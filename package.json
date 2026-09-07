@@ -1,0 +1,19 @@
+{
+  "name": "bedapos-hono",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "npx wrangler dev src/index.js",
+    "deploy": "npx wrangler deploy --minify src/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.750.0",
+    "@google/generative-ai": "^0.22.0",
+    "exceljs": "^4.4.0",
+    "hono": "^4.7.0",
+    "midtrans-client": "^1.4.2"
+  },
+  "devDependencies": {
+    "wrangler": "^3.100.0"
+  }
+}

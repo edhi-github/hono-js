@@ -1,0 +1,31 @@
+name = "bedapos-api"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = [ "nodejs_compat" ]
+
+# Binding Database D1 SQLite
+[[d1_databases]]
+binding = "beda_pos"
+database_name = "beda_pos"
+database_id = "9acf87ab-5048-43fd-90fc-88862e0b6b7f"
+
+# Bindings R2 Bucket (sesuai nama bucket di Cloudflare R2 Anda)
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "bedapos-bucket"
+
+# Environment Variables
+[vars]
+MYSQLHOST = ""
+MYSQLUSER = ""
+MYSQLPASSWORD = ""
+MYSQL_DATABASE = ""
+MYSQLPORT = "3306"
+R2_ENDPOINT = ""
+R2_ACCESS_KEY_ID = ""
+R2_SECRET_ACCESS_KEY = ""
+R2_PUBLIC_URL = ""
+MIDTRANS_IS_PRODUCTION = "true"
+MIDTRANS_SERVER_KEY = ""
+MIDTRANS_CLIENT_KEY = ""
+GEMINI_API_KEY = ""
