@@ -1212,21 +1212,18 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
    
             const binaryData = new Uint8Array(arrayBuffer);
 
-            // 2. Tentukan Mime Type secara akurat
-            let mimeType = file.type;
-            if (!mimeType || mimeType === 'application/octet-stream') {
-                mimeType = fileExtension === 'png' ? 'image/png' : 'image/jpeg';
-            }
-
-            // 3. Simpan ke Cloudflare R2 Bucket
+            // Simpan ke Cloudflare R2 Bucket
             await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
                 httpMetadata: { 
                     contentType: mimeType
                 }
             });
 
-            // Hilangkan slash di akhir R2_PUBLIC_URL jika ada
-            const publicUrl = (c.env.R2_PUBLIC_URL || '').replace(/\/+$/, '');
+            // Gunakan fallback URL R2 domain public jika variabel environment R2_PUBLIC_URL di Workers belum diset
+            const publicUrl = (c.env.R2_PUBLIC_URL && c.env.R2_PUBLIC_URL.trim() !== '') 
+                ? c.env.R2_PUBLIC_URL.replace(/\/+$/, '') 
+                : 'https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev';
+
             const urlFoto = `${publicUrl}/${uniqueFilename}`;
             qrisUrlQuery = ", qris_image_url = ?";
             params.push(urlFoto);
@@ -1246,6 +1243,28 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
     } catch (error) {
         console.error("Error update setting toko:", error);
         return c.json({ success: false, message: "Gagal menyimpan pengaturan toko: " + error.message }, 500);
+    }
+});
+
+// Direct serve image dari R2 untuk mengatasi masalah CORS/404 pada domain workers.dev
+app.get('/qris-:file', async (c) => {
+    try {
+        const fileName = `qris-${c.req.param('file')}`;
+        const object = await c.env.R2_BUCKET.get(fileName);
+        
+        if (!object) {
+            return c.text('Gambar tidak ditemukan', 404);
+        }
+
+        const headers = new Headers();
+        object.writeHttpMetadata(headers);
+        headers.set('etag', object.httpEtag);
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Cache-Control', 'public, max-age=31536000');
+
+        return new Response(object.body, { headers });
+    } catch (e) {
+        return c.text('Error memuat gambar', 500);
     }
 });
 
