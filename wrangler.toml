@@ -12,7 +12,7 @@ database_id = "9acf87ab-5048-43fd-90fc-88862e0b6b7f"
 # Bindings R2 Bucket (sesuai nama bucket di Cloudflare R2 Anda)
 [[r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "bedapos-bucket"
+bucket_name = "beda-asset"
 
 # Environment Variables
 [vars]
@@ -30,4 +30,4 @@ MIDTRANS_IS_PRODUCTION = "true"
 MIDTRANS_SERVER_KEY = ""
 MIDTRANS_CLIENT_KEY = ""
 GEMINI_API_KEY = ""
-R2_BUCKET_STR = "bedapos-bucket"
+R2_BUCKET_STR = "beda-asset"

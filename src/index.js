@@ -1190,14 +1190,44 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
             const uniqueFilename = `qris-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await file.arrayBuffer();
 
-            await s3.send(new PutObjectCommand({
+            /*await s3.send(new PutObjectCommand({
                 Bucket: c.env.R2_BUCKET_STR,
                 Key: uniqueFilename,
                 Body: Buffer.from(arrayBuffer),
                 ContentType: file.type || 'image/jpeg',
             }));
+            // Upload menggunakan R2 Binding bawaan atau S3 Client
+            if (c.env.R2_BUCKET) {
+                await c.env.R2_BUCKET.put(uniqueFilename, arrayBuffer, {
+                    httpMetadata: { contentType: file.type || 'image/jpeg' }
+                });
+            } else {
+                await s3.send(new PutObjectCommand({
+                    Bucket: c.env.R2_BUCKET_STR,
+                    Key: uniqueFilename,
+                    Body: Buffer.from(arrayBuffer),
+                    ContentType: file.type || 'image/jpeg',
+                }));
+            }*/
+   
+            const binaryData = new Uint8Array(arrayBuffer);
 
-            const urlFoto = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            // 2. Tentukan Mime Type secara akurat
+            let mimeType = file.type;
+            if (!mimeType || mimeType === 'application/octet-stream') {
+                mimeType = fileExtension === 'png' ? 'image/png' : 'image/jpeg';
+            }
+
+            // 3. Simpan ke Cloudflare R2 Bucket
+            await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+                httpMetadata: { 
+                    contentType: mimeType
+                }
+            });
+
+            // Hilangkan slash di akhir R2_PUBLIC_URL jika ada
+            const publicUrl = (c.env.R2_PUBLIC_URL || '').replace(/\/+$/, '');
+            const urlFoto = `${publicUrl}/${uniqueFilename}`;
             qrisUrlQuery = ", qris_image_url = ?";
             params.push(urlFoto);
         }
