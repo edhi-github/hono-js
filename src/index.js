@@ -302,7 +302,7 @@ app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
             const arrayBuffer = await file.arrayBuffer();
 
             const uploadParams = {
-                Bucket: c.env.R2_BUCKET_NAME,
+                Bucket: c.env.R2_BUCKET_STR,
                 Key: uniqueFilename,
                 Body: Buffer.from(arrayBuffer), 
                 ContentType: file.type || 'image/jpeg',
@@ -368,7 +368,7 @@ app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, async (c) 
             const arrayBuffer = await file.arrayBuffer();
 
             const uploadParams = {
-                Bucket: c.env.R2_BUCKET_NAME,
+                Bucket: c.env.R2_BUCKET_STR,
                 Key: uniqueFilename,
                 Body: Buffer.from(arrayBuffer), 
                 ContentType: file.type || 'image/jpeg',
@@ -627,7 +627,7 @@ app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
             const arrayBuffer = await proofFile.arrayBuffer();
 
             await s3.send(new PutObjectCommand({
-                Bucket: c.env.R2_BUCKET_NAME,
+                Bucket: c.env.R2_BUCKET_STR,
                 Key: uniqueFilename,
                 Body: Buffer.from(arrayBuffer), 
                 ContentType: proofFile.type || 'image/jpeg',
@@ -981,7 +981,7 @@ app.post('/api/shops/subscribe', verifikasiAksesWarung, async (c) => {
         const arrayBuffer = await proofFile.arrayBuffer();
 
         await s3.send(new PutObjectCommand({
-            Bucket: c.env.R2_BUCKET_NAME,
+            Bucket: c.env.R2_BUCKET_STR,
             Key: uniqueFilename,
             Body: Buffer.from(arrayBuffer),
             ContentType: proofFile.type || 'image/jpeg',
@@ -1191,7 +1191,7 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
             const arrayBuffer = await file.arrayBuffer();
 
             await s3.send(new PutObjectCommand({
-                Bucket: c.env.R2_BUCKET_NAME,
+                Bucket: c.env.R2_BUCKET_STR,
                 Key: uniqueFilename,
                 Body: Buffer.from(arrayBuffer),
                 ContentType: file.type || 'image/jpeg',
