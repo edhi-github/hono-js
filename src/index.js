@@ -1246,7 +1246,7 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
     }
 });
 
-// Direct serve image dari R2 untuk mengatasi masalah CORS/404 pada domain workers.dev
+// Direct serve image dari R2 untuk  mengatasi masalah CORS/404 pada domain workers.dev
 app.get('/qris-:file', async (c) => {
     try {
         const fileName = `qris-${c.req.param('file')}`;
