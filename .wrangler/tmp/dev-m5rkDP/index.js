@@ -62962,17 +62962,15 @@ app.post("/api/products", verifikasiAksesWarung, cekMasaAktifSub, async (c2) => 
     let urlFoto = "";
     const file = body.foto_produk;
     if (file && typeof file === "object" && file.name) {
-      const fileExtension = file.name.split(".").pop();
+      const fileExtension = file.name.split(".").pop().toLowerCase();
       const uniqueFilename = `product-${Date.now()}-${crypto_default.randomBytes(4).toString("hex")}.${fileExtension}`;
       const arrayBuffer = await file.arrayBuffer();
-      const uploadParams = {
-        Bucket: c2.env.R2_BUCKET_STR,
-        Key: uniqueFilename,
-        Body: Buffer.from(arrayBuffer),
-        ContentType: file.type || "image/jpeg"
-      };
-      await s3.send(new PutObjectCommand(uploadParams));
-      urlFoto = `${c2.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+      const binaryData = new Uint8Array(arrayBuffer);
+      let mimeType = file.type || (fileExtension === "png" ? "image/png" : "image/jpeg");
+      await c2.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+        httpMetadata: { contentType: mimeType }
+      });
+      urlFoto = `/api/images/${uniqueFilename}`;
     }
     const inputStock = stock !== void 0 && stock !== "" ? parseInt(stock) : 20;
     const discount_percentage = parseFloat(body.discount_percentage) || 0;
@@ -63013,17 +63011,15 @@ app.post("/api/products/:id", verifikasiAksesWarung, cekMasaAktifSub, async (c2)
     let urlFoto = existingProduct[0].image_url;
     const file = body.foto_produk;
     if (file && typeof file === "object" && file.name) {
-      const fileExtension = file.name.split(".").pop();
+      const fileExtension = file.name.split(".").pop().toLowerCase();
       const uniqueFilename = `product-${Date.now()}-${crypto_default.randomBytes(4).toString("hex")}.${fileExtension}`;
       const arrayBuffer = await file.arrayBuffer();
-      const uploadParams = {
-        Bucket: c2.env.R2_BUCKET_STR,
-        Key: uniqueFilename,
-        Body: Buffer.from(arrayBuffer),
-        ContentType: file.type || "image/jpeg"
-      };
-      await s3.send(new PutObjectCommand(uploadParams));
-      urlFoto = `${c2.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+      const binaryData = new Uint8Array(arrayBuffer);
+      let mimeType = file.type || (fileExtension === "png" ? "image/png" : "image/jpeg");
+      await c2.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+        httpMetadata: { contentType: mimeType }
+      });
+      urlFoto = `/api/images/${uniqueFilename}`;
     }
     const discount_percentage = parseFloat(body.discount_percentage) || 0;
     await pool.prepare(`
@@ -63228,16 +63224,15 @@ app.post("/api/checkout", verifikasiAksesWarung, cekMasaAktifSub, async (c2) => 
     let urlBuktiBayar = null;
     const proofFile = body.payment_proof;
     if (proofFile && typeof proofFile === "object" && proofFile.name) {
-      const fileExtension = proofFile.name.split(".").pop();
+      const fileExtension = proofFile.name.split(".").pop().toLowerCase();
       const uniqueFilename = `proof-${Date.now()}-${crypto_default.randomBytes(4).toString("hex")}.${fileExtension}`;
       const arrayBuffer = await proofFile.arrayBuffer();
-      await s3.send(new PutObjectCommand({
-        Bucket: c2.env.R2_BUCKET_STR,
-        Key: uniqueFilename,
-        Body: Buffer.from(arrayBuffer),
-        ContentType: proofFile.type || "image/jpeg"
-      }));
-      urlBuktiBayar = `${c2.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+      const binaryData = new Uint8Array(arrayBuffer);
+      let mimeType = proofFile.type || (fileExtension === "png" ? "image/png" : "image/jpeg");
+      await c2.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+        httpMetadata: { contentType: mimeType }
+      });
+      urlBuktiBayar = `/api/images/${uniqueFilename}`;
     }
     const { results: shopRows } = await pool.prepare(
       "SELECT package_id, is_stock_calculated FROM shops WHERE id = ?"
