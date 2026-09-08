@@ -1186,45 +1186,20 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
 
         const file = body.qris_image;
         if (file && typeof file === 'object' && file.name) {
-            const fileExtension = file.name.split('.').pop();
+            const fileExtension = file.name.split('.').pop().toLowerCase();
             const uniqueFilename = `qris-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await file.arrayBuffer();
-
-            /*await s3.send(new PutObjectCommand({
-                Bucket: c.env.R2_BUCKET_STR,
-                Key: uniqueFilename,
-                Body: Buffer.from(arrayBuffer),
-                ContentType: file.type || 'image/jpeg',
-            }));
-            // Upload menggunakan R2 Binding bawaan atau S3 Client
-            if (c.env.R2_BUCKET) {
-                await c.env.R2_BUCKET.put(uniqueFilename, arrayBuffer, {
-                    httpMetadata: { contentType: file.type || 'image/jpeg' }
-                });
-            } else {
-                await s3.send(new PutObjectCommand({
-                    Bucket: c.env.R2_BUCKET_STR,
-                    Key: uniqueFilename,
-                    Body: Buffer.from(arrayBuffer),
-                    ContentType: file.type || 'image/jpeg',
-                }));
-            }*/
-   
             const binaryData = new Uint8Array(arrayBuffer);
 
-            // Simpan ke Cloudflare R2 Bucket
+            let mimeType = file.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
+
+            // Simpan ke R2 via binding Worker
             await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
-                httpMetadata: { 
-                    contentType: mimeType
-                }
+                httpMetadata: { contentType: mimeType }
             });
 
-            // Gunakan fallback URL R2 domain public jika variabel environment R2_PUBLIC_URL di Workers belum diset
-            const publicUrl = (c.env.R2_PUBLIC_URL && c.env.R2_PUBLIC_URL.trim() !== '') 
-                ? c.env.R2_PUBLIC_URL.replace(/\/+$/, '') 
-                : 'https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev';
-
-            const urlFoto = `${publicUrl}/${uniqueFilename}`;
+            // Simpan rute API internal ke Database
+            const urlFoto = `/api/images/${uniqueFilename}`;
             qrisUrlQuery = ", qris_image_url = ?";
             params.push(urlFoto);
         }
@@ -1245,26 +1220,28 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
         return c.json({ success: false, message: "Gagal menyimpan pengaturan toko: " + error.message }, 500);
     }
 });
-
-// Direct serve image dari R2 untuk  mengatasi masalah CORS/404 pada domain workers.dev
-app.get('/qris-:file', async (c) => {
+// ---------------- IMAGE PROXY SERVER (UNTUK SEMUA GAMBAR R2) ----------------
+app.get('/api/images/:key', async (c) => {
     try {
-        const fileName = `qris-${c.req.param('file')}`;
-        const object = await c.env.R2_BUCKET.get(fileName);
-        
+        const key = c.req.param('key');
+        if (!key) return c.text('Key gambar tidak ditemukan', 400);
+
+        // Ambil objek gambar langsung dari R2 via internal binding
+        const object = await c.env.R2_BUCKET.get(key);
         if (!object) {
-            return c.text('Gambar tidak ditemukan', 404);
+            return c.text('Gambar tidak ditemukan di R2', 404);
         }
 
         const headers = new Headers();
         object.writeHttpMetadata(headers);
         headers.set('etag', object.httpEtag);
-        headers.set('Access-Control-Allow-Origin', '*');
-        headers.set('Cache-Control', 'public, max-age=31536000');
+        headers.set('Access-Control-Allow-Origin', '*'); // Bebas CORS di semua browser
+        headers.set('Cache-Control', 'public, max-age=31536000'); // Cache gambar 1 tahun
 
         return new Response(object.body, { headers });
-    } catch (e) {
-        return c.text('Error memuat gambar', 500);
+    } catch (error) {
+        console.error("Error serving image via Worker:", error);
+        return c.text("Gagal memuat gambar: " + error.message, 500);
     }
 });
 

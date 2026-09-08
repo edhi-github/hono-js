@@ -46664,9 +46664,9 @@ var serveStatic = /* @__PURE__ */ __name((options) => {
       return c2.newResponse(content.body, content);
     }
     if (content != null) {
-      const mimeType2 = options.mimes && getMimeType(path, options.mimes) || getMimeType(path);
-      c2.header("Content-Type", mimeType2 || "application/octet-stream");
-      if (options.precompressed && (!mimeType2 || COMPRESSIBLE_CONTENT_TYPE_REGEX.test(mimeType2))) {
+      const mimeType = options.mimes && getMimeType(path, options.mimes) || getMimeType(path);
+      c2.header("Content-Type", mimeType || "application/octet-stream");
+      if (options.precompressed && (!mimeType || COMPRESSIBLE_CONTENT_TYPE_REGEX.test(mimeType))) {
         const acceptEncodingSet = new Set(
           c2.req.header("Accept-Encoding")?.split(",").map((encoding) => encoding.trim())
         );
@@ -63698,17 +63698,15 @@ app.put("/api/shops/settings", verifikasiAksesWarung, cekMasaAktifSub, async (c2
     let params = [show_cash_payment, has_tax, is_stock_calculated, tax_percentage, discount_percentage, bank_rekening_info];
     const file = body.qris_image;
     if (file && typeof file === "object" && file.name) {
-      const fileExtension = file.name.split(".").pop();
+      const fileExtension = file.name.split(".").pop().toLowerCase();
       const uniqueFilename = `qris-${Date.now()}-${crypto_default.randomBytes(4).toString("hex")}.${fileExtension}`;
       const arrayBuffer = await file.arrayBuffer();
       const binaryData = new Uint8Array(arrayBuffer);
+      let mimeType = file.type || (fileExtension === "png" ? "image/png" : "image/jpeg");
       await c2.env.R2_BUCKET.put(uniqueFilename, binaryData, {
-        httpMetadata: {
-          contentType: mimeType
-        }
+        httpMetadata: { contentType: mimeType }
       });
-      const publicUrl = c2.env.R2_PUBLIC_URL && c2.env.R2_PUBLIC_URL.trim() !== "" ? c2.env.R2_PUBLIC_URL.replace(/\/+$/, "") : "https://pub-c3b5b9a8f041497f97f050b2133dbd3a.r2.dev";
-      const urlFoto = `${publicUrl}/${uniqueFilename}`;
+      const urlFoto = `/api/images/${uniqueFilename}`;
       qrisUrlQuery = ", qris_image_url = ?";
       params.push(urlFoto);
     }
@@ -63725,12 +63723,14 @@ app.put("/api/shops/settings", verifikasiAksesWarung, cekMasaAktifSub, async (c2
     return c2.json({ success: false, message: "Gagal menyimpan pengaturan toko: " + error3.message }, 500);
   }
 });
-app.get("/qris-:file", async (c2) => {
+app.get("/api/images/:key", async (c2) => {
   try {
-    const fileName = `qris-${c2.req.param("file")}`;
-    const object = await c2.env.R2_BUCKET.get(fileName);
+    const key = c2.req.param("key");
+    if (!key)
+      return c2.text("Key gambar tidak ditemukan", 400);
+    const object = await c2.env.R2_BUCKET.get(key);
     if (!object) {
-      return c2.text("Gambar tidak ditemukan", 404);
+      return c2.text("Gambar tidak ditemukan di R2", 404);
     }
     const headers = new Headers();
     object.writeHttpMetadata(headers);
@@ -63738,8 +63738,9 @@ app.get("/qris-:file", async (c2) => {
     headers.set("Access-Control-Allow-Origin", "*");
     headers.set("Cache-Control", "public, max-age=31536000");
     return new Response(object.body, { headers });
-  } catch (e2) {
-    return c2.text("Error memuat gambar", 500);
+  } catch (error3) {
+    console.error("Error serving image via Worker:", error3);
+    return c2.text("Gagal memuat gambar: " + error3.message, 500);
   }
 });
 app.get("/api/orders/details/:orderId", verifikasiAksesWarung, async (c2) => {
