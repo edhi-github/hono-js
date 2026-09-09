@@ -721,7 +721,8 @@ app.get('/api/packages', async (c) => {
     }
 });
 
-app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
+//pake railway jalan, tapi pake cloudflare ga jalan, ganti pake yg dibawah
+/*app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
     const pool = getDbPool(c);
     try {
         const snap = getSnapClient(c);
@@ -775,7 +776,195 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
         console.error("Error generate Midtrans Snap:", error);
         return c.json({ success: false, message: "Gagal membuat transaksi Midtrans: " + error.message }, 500);
     }
+});*/
+
+app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
+    const pool = getDbPool(c);
+    try {
+        const body = await c.req.json();
+        const { shop, package_id, billing_cycle } = body;
+
+        if (!package_id || !billing_cycle) {
+            return c.json({ success: false, message: "Paket dan siklus tagihan wajib dipilih." }, 400);
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
+
+        const { results: pkgRows } = await pool.prepare('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?').bind(package_id).all();
+        if (!pkgRows || pkgRows.length === 0) return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
+
+        const pkg = pkgRows[0];
+        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
+        const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
+        const orderId = `SUB-${shopId}-${Date.now()}`;
+
+        // Ambil env variable
+        const env = c.env;
+        const serverKey = env.MIDTRANS_SERVER_KEY || '';
+        const isProduction = env.MIDTRANS_IS_PRODUCTION === 'true';
+
+        // Endpoint Midtrans Snap REST API Direct
+        const snapApiUrl = isProduction 
+            ? 'https://app.midtrans.com/snap/v1/transactions' 
+            : 'https://app.sandbox.midtrans.com/snap/v1/transactions';
+
+        // Encode Server Key ke Base64 (dengan titik dua di belakang sesuai format Auth Midtrans)
+        const authHeader = `Basic ${btoa(serverKey + ':')}`;
+
+        const parameter = {
+            transaction_details: { 
+                order_id: orderId, 
+                gross_amount: Math.round(amount) 
+            },
+            item_details: [{
+                id: `PKG-${package_id}`,
+                price: Math.round(amount),
+                quantity: 1,
+                name: `Paket ${pkg.name} (${cycle.toUpperCase()})`
+            }]
+        };
+
+        // Kirim request direct via Fetch Native Cloudflare Worker
+        const midtransRes = await fetch(snapApiUrl, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': authHeader
+            },
+            body: JSON.stringify(parameter)
+        });
+
+        const snapData = await midtransRes.json();
+
+        if (!midtransRes.ok || !snapData.token) {
+            console.error("Midtrans API Error:", snapData);
+            return c.json({ 
+                success: false, 
+                message: "Gagal dari Midtrans: " + (snapData.error_messages ? snapData.error_messages.join(', ') : 'Gagal membuat token Snap') 
+            }, 500);
+        }
+
+        const startDateStr = new Date().toISOString().split('T')[0];
+
+        await pool.prepare(
+            `INSERT INTO subscriptions 
+            (order_id, shop_id, package_id, package_name, amount, start_date, end_date, status, payment_proof_url, billing_cycle) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        ).bind(orderId, shopId, parseInt(package_id), `${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, startDateStr, orderId, cycle).run();
+
+        return c.json({
+            success: true,
+            order_id: orderId,
+            gross_amount: amount,
+            snap_token: snapData.token
+        });
+    } catch (error) {
+        console.error("Error generate Midtrans Snap:", error);
+        return c.json({ success: false, message: "Gagal membuat transaksi Midtrans: " + error.message }, 500);
+    }
 });
+
+//di railway jalan, tapi di cloudeflare ga jalan, ganti pake yg bawah
+/*app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
+    try {
+        const pool = getDbPool(c);
+        const snap = getSnapClient(c);
+        const orderId = c.req.param('orderId');
+
+        const statusResponse = await snap.transaction.status(orderId);
+        const transactionStatus = statusResponse.transaction_status;
+        const fraudStatus = statusResponse.fraud_status;
+
+        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
+            try {
+                const { results: subRows } = await pool.prepare(
+                    `SELECT id, shop_id, package_id, billing_cycle 
+                     FROM subscriptions 
+                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+                ).bind(orderId, orderId).all();
+
+                if (subRows && subRows.length > 0) {
+                    const sub = subRows[0];
+                    const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+                    const { results: shopRows } = await pool.prepare(
+                        `SELECT subscription_until, max_transactions_monthly, package_id FROM shops WHERE id = ?`
+                    ).bind(sub.shop_id).all();
+
+                    const shop = shopRows[0];
+                    const hariIni = new Date();
+
+                    const { results: pkgRows } = await pool.prepare(
+                        'SELECT id, max_transactions_monthly FROM packages WHERE id = ?'
+                    ).bind(sub.package_id).all();
+                    const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+                    const isNewSultan = (sub.package_id === 3);
+
+                    let newUntilDate = new Date();
+                    let newQuota = 0;
+
+                    if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+                        const baseDate = new Date(shop.subscription_until);
+                        baseDate.setDate(baseDate.getDate() + daysToAdd);
+                        newUntilDate = baseDate;
+
+                        if (isNewSultan) {
+                            newQuota = 0;
+                        } else {
+                            const currentQuota = Math.max(0, parseInt(shop.max_transactions_monthly) || 0);
+                            newQuota = currentQuota + pkgMaxTx;
+                        }
+                    } else {
+                        const baseDate = new Date();
+                        baseDate.setDate(baseDate.getDate() + daysToAdd);
+                        newUntilDate = baseDate;
+
+                        newQuota = isNewSultan ? 0 : pkgMaxTx;
+                    }
+
+                    const startDateStr = hariIni.toISOString().split('T')[0];
+                    const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+                    await pool.prepare(
+                        `UPDATE shops 
+                        SET subscription_status = 'active', 
+                            subscription_until = ?, 
+                            package_id = ?, 
+                            billing_cycle = ?,
+                            max_transactions_monthly = ? 
+                        WHERE id = ?`
+                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
+
+                    await pool.prepare(
+                        `UPDATE subscriptions 
+                        SET status = 'active', 
+                            start_date = ?, 
+                            end_date = ?,
+                            max_transactions_monthly = ?
+                        WHERE id = ?`
+                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
+                }
+            } catch (err) {
+                console.error("Error update DB via Polling status:", err);
+            }
+        }
+
+        return c.json({
+            success: true,
+            order_id: orderId,
+            transaction_status: transactionStatus,
+            fraud_status: fraudStatus
+        });
+    } catch (error) {
+        console.error("Gagal cek status Midtrans:", error);
+        return c.json({ 
+            success: false, 
+            message: "Gagal memeriksa status pembayaran Midtrans." 
+        }, 500);
+    }
+});*/
 
 app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
     try {
