@@ -750,7 +750,8 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
             ? 'https://app.midtrans.com/snap/v1/transactions' 
             : 'https://app.sandbox.midtrans.com/snap/v1/transactions';
 
-        const authHeader = `Basic ${btoa(serverKey + ':')}`;
+        // Basic Auth Base64 Encoding
+        const authHeader = `Basic ${btoa(serverKey.trim() + ':')}`;
 
         const parameter = {
             transaction_details: { 
@@ -781,7 +782,7 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
             console.error("Midtrans API Error:", snapData);
             return c.json({ 
                 success: false, 
-                message: "Gagal dari Midtrans: " + (snapData.error_messages ? snapData.error_messages.join(', ') : 'Gagal membuat token Snap') 
+                message: "Gagal dari Midtrans: " + (snapData.error_messages ? snapData.error_messages.join(', ') : (snapData.message || 'Gagal membuat token Snap')) 
             }, 500);
         }
 
@@ -818,7 +819,7 @@ app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, asyn
             ? `https://api.midtrans.com/v2/${orderId}/status` 
             : `https://api.sandbox.midtrans.com/v2/${orderId}/status`;
 
-        const authHeader = `Basic ${btoa(serverKey + ':')}`;
+        const authHeader = `Basic ${btoa(serverKey.trim() + ':')}`;
 
         const midRes = await fetch(statusApiUrl, {
             headers: {
@@ -1472,14 +1473,16 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
 });
 
 // ---------------- MIDTRANS NOTIFICATION WEBHOOK ----------------
-app.all('/api/payments/midtrans-notification', async (c) => {
-    if (c.req.method === 'GET') {
-        return c.json({ 
-            success: true, 
-            message: "Endpoint Webhook Midtrans Aktif dan Siap Menerima Request POST." 
-        }, 200);
-    }
+// Handler khusus GET (pemeriksaan browser)
+app.get('/api/payments/midtrans-notification', (c) => {
+    return c.json({ 
+        success: true, 
+        message: "Endpoint Webhook Midtrans Aktif dan Siap Menerima Request POST." 
+    }, 200);
+});
 
+// Handler khusus POST (pemrosesan data notifikasi dari Midtrans)
+app.post('/api/payments/midtrans-notification', async (c) => {
     try {
         const pool = getDbPool(c);
         let notification = {};
