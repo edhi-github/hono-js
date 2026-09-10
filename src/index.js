@@ -1734,10 +1734,25 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
     }
 });*/
 
+// ---------------- MIDTRANS NOTIFICATION WEBHOOK ----------------
 app.all('/api/payments/midtrans-notification', async (c) => {
+    // Jika dibuka langsung via Browser (Request GET)
+    if (c.req.method === 'GET') {
+        return c.json({ 
+            success: true, 
+            message: "Endpoint Webhook Midtrans Aktif dan Siap Menerima Request POST." 
+        }, 200);
+    }
+
     try {
         const pool = getDbPool(c);
-        const notification = await c.req.json();
+        let notification = {};
+        
+        try {
+            notification = await c.req.json();
+        } catch (e) {
+            return c.json({ success: true, message: "No payload received" }, 200);
+        }
         
         if (!notification || Object.keys(notification).length === 0) {
             return c.json({ success: true, message: "Notification test received." }, 200);
@@ -1763,7 +1778,6 @@ app.all('/api/payments/midtrans-notification', async (c) => {
 
         // Jika status pembayaran sukses (settlement atau capture accept)
         if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
-            // Cari data subscription berdasarkan order_id atau payment_proof_url
             const { results: subRows } = await pool.prepare(
                 `SELECT id, shop_id, package_id, billing_cycle 
                  FROM subscriptions 
@@ -1807,7 +1821,6 @@ app.all('/api/payments/midtrans-notification', async (c) => {
                 const startDateStr = hariIni.toISOString().split('T')[0];
                 const newUntilStr = newUntilDate.toISOString().split('T')[0];
 
-                // Update status toko
                 await pool.prepare(
                     `UPDATE shops 
                     SET subscription_status = 'active', 
@@ -1818,7 +1831,6 @@ app.all('/api/payments/midtrans-notification', async (c) => {
                     WHERE id = ?`
                 ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
 
-                // Update status riwayat langganan
                 await pool.prepare(
                     `UPDATE subscriptions 
                     SET status = 'active', 
@@ -1830,11 +1842,9 @@ app.all('/api/payments/midtrans-notification', async (c) => {
             }
         }
 
-        // WAJIB KEMBALIKAN STATUS 200 KE MIDTRANS
         return c.json({ success: true, message: "Notification processed." }, 200);
     } catch (error) {
         console.error("Error Webhook Midtrans:", error);
-        // Tetap berikan status 200 agar Midtrans tidak terus mengulang pengiriman error
         return c.json({ success: false, message: error.message }, 200);
     }
 });
