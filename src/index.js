@@ -1736,7 +1736,7 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
 
 // ---------------- MIDTRANS NOTIFICATION WEBHOOK ----------------
 app.all('/api/payments/midtrans-notification', async (c) => {
-    // Jika dibuka langsung via Browser (Request GET)
+    // 1. Cek langsung HTTP Method. Jika GET (buka via browser), langsung kembalikan respon tanpa parsing JSON
     if (c.req.method === 'GET') {
         return c.json({ 
             success: true, 
