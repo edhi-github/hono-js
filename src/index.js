@@ -1734,7 +1734,7 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
     }
 });*/
 
-app.post('/api/payments/midtrans-notification', async (c) => {
+app.all('/api/payments/midtrans-notification', async (c) => {
     try {
         const pool = getDbPool(c);
         const notification = await c.req.json();
