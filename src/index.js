@@ -1618,7 +1618,8 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
     }
 });
 
-app.post('/api/payments/midtrans-notification', async (c) => {
+//di incative karena ganti server ke cloudeflare yang metode nya berbeda
+/*app.post('/api/payments/midtrans-notification', async (c) => {
     try {
         const pool = getDbPool(c);
         const snap = getSnapClient(c);
@@ -1730,6 +1731,111 @@ app.post('/api/payments/midtrans-notification', async (c) => {
     } catch (error) {
         console.error("Error Webhook Midtrans:", error);
         return c.json({ success: false, message: error.message });
+    }
+});*/
+
+app.post('/api/payments/midtrans-notification', async (c) => {
+    try {
+        const pool = getDbPool(c);
+        const notification = await c.req.json();
+        
+        if (!notification || Object.keys(notification).length === 0) {
+            return c.json({ success: true, message: "Notification test received." }, 200);
+        }
+
+        const orderId = notification.order_id || '';
+        const transactionStatus = notification.transaction_status;
+        const fraudStatus = notification.fraud_status;
+
+        // Forwarding jika transaksi berasal dari sistem lain (Pesan Antar)
+        if (orderId.startsWith('BEDAORDER-') || orderId.startsWith('ORDER-')) {
+            try {
+                await fetch('https://nodejs-pesan-antar-production.up.railway.app/api/payments/midtrans-notification', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(notification)
+                });
+            } catch (fwdError) {
+                console.error("Forwarding failed:", fwdError);
+            }
+            return c.json({ success: true, message: "Forwarded" }, 200);
+        }
+
+        // Jika status pembayaran sukses (settlement atau capture accept)
+        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
+            // Cari data subscription berdasarkan order_id atau payment_proof_url
+            const { results: subRows } = await pool.prepare(
+                `SELECT id, shop_id, package_id, billing_cycle 
+                 FROM subscriptions 
+                 WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+            ).bind(orderId, orderId).all();
+
+            if (subRows && subRows.length > 0) {
+                const sub = subRows[0];
+                const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+                const { results: shopRows } = await pool.prepare(
+                    `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ?`
+                ).bind(sub.shop_id).all();
+
+                const { results: pkgRows } = await pool.prepare(
+                    `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`
+                ).bind(sub.package_id).all();
+
+                const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+                const isNewSultan = (sub.package_id === 3);
+                const shop = shopRows[0];
+                const hariIni = new Date();
+
+                let newUntilDate = new Date();
+                let newQuota = 0;
+
+                if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+                    const baseDate = new Date(shop.subscription_until);
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : (Math.max(0, parseInt(shop.max_transactions_monthly) || 0) + pkgMaxTx);
+                } else {
+                    const baseDate = new Date();
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : pkgMaxTx;
+                }
+
+                const startDateStr = hariIni.toISOString().split('T')[0];
+                const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+                // Update status toko
+                await pool.prepare(
+                    `UPDATE shops 
+                    SET subscription_status = 'active', 
+                        subscription_until = ?, 
+                        package_id = ?, 
+                        billing_cycle = ?,
+                        max_transactions_monthly = ? 
+                    WHERE id = ?`
+                ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
+
+                // Update status riwayat langganan
+                await pool.prepare(
+                    `UPDATE subscriptions 
+                    SET status = 'active', 
+                        start_date = ?, 
+                        end_date = ?,
+                        max_transactions_monthly = ?
+                    WHERE id = ?`
+                ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
+            }
+        }
+
+        // WAJIB KEMBALIKAN STATUS 200 KE MIDTRANS
+        return c.json({ success: true, message: "Notification processed." }, 200);
+    } catch (error) {
+        console.error("Error Webhook Midtrans:", error);
+        // Tetap berikan status 200 agar Midtrans tidak terus mengulang pengiriman error
+        return c.json({ success: false, message: error.message }, 200);
     }
 });
 
