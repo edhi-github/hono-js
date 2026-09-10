@@ -721,63 +721,6 @@ app.get('/api/packages', async (c) => {
     }
 });
 
-//pake railway jalan, tapi pake cloudflare ga jalan, ganti pake yg dibawah
-/*app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
-    const pool = getDbPool(c);
-    try {
-        const snap = getSnapClient(c);
-        const body = await c.req.json();
-        const { shop, package_id, billing_cycle } = body;
-
-        if (!package_id || !billing_cycle) {
-            return c.json({ success: false, message: "Paket dan siklus tagihan wajib dipilih." }, 400);
-        }
-
-        const shopId = await getShopIdBySlug(pool, shop);
-        if (!shopId) return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
-
-        const { results: pkgRows } = await pool.prepare('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?').bind(package_id).all();
-        if (!pkgRows || pkgRows.length === 0) return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
-
-        const pkg = pkgRows[0];
-        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
-        const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
-        const orderId = `SUB-${shopId}-${Date.now()}`;
-
-        const parameter = {
-            transaction_details: { 
-                order_id: orderId, 
-                gross_amount: Math.round(amount) 
-            },
-            item_details: [{
-                id: `PKG-${package_id}`,
-                price: Math.round(amount),
-                quantity: 1,
-                name: `Paket ${pkg.name} (${cycle.toUpperCase()})`
-            }]
-        };
-
-        const transaction = await snap.createTransaction(parameter);
-        const startDateStr = new Date().toISOString().split('T')[0];
-
-        await pool.prepare(
-            `INSERT INTO subscriptions 
-            (order_id, shop_id, package_id, package_name, amount, start_date, end_date, status, payment_proof_url, billing_cycle) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
-        ).bind(orderId, shopId, parseInt(package_id), `${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, startDateStr, orderId, cycle).run();
-
-        return c.json({
-            success: true,
-            order_id: orderId,
-            gross_amount: amount,
-            snap_token: transaction.token
-        });
-    } catch (error) {
-        console.error("Error generate Midtrans Snap:", error);
-        return c.json({ success: false, message: "Gagal membuat transaksi Midtrans: " + error.message }, 500);
-    }
-});*/
-
 app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
     const pool = getDbPool(c);
     try {
@@ -799,17 +742,14 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
         const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
         const orderId = `SUB-${shopId}-${Date.now()}`;
 
-        // Ambil env variable
         const env = c.env;
         const serverKey = env.MIDTRANS_SERVER_KEY || '';
         const isProduction = env.MIDTRANS_IS_PRODUCTION === 'true';
 
-        // Endpoint Midtrans Snap REST API Direct
         const snapApiUrl = isProduction 
             ? 'https://app.midtrans.com/snap/v1/transactions' 
             : 'https://app.sandbox.midtrans.com/snap/v1/transactions';
 
-        // Encode Server Key ke Base64 (dengan titik dua di belakang sesuai format Auth Midtrans)
         const authHeader = `Basic ${btoa(serverKey + ':')}`;
 
         const parameter = {
@@ -825,7 +765,6 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
             }]
         };
 
-        // Kirim request direct via Fetch Native Cloudflare Worker
         const midtransRes = await fetch(snapApiUrl, {
             method: 'POST',
             headers: {
@@ -866,113 +805,29 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
     }
 });
 
-//di railway jalan, tapi di cloudeflare ga jalan, ganti pake yg bawah
-/*app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
-    try {
-        const pool = getDbPool(c);
-        const snap = getSnapClient(c);
-        const orderId = c.req.param('orderId');
-
-        const statusResponse = await snap.transaction.status(orderId);
-        const transactionStatus = statusResponse.transaction_status;
-        const fraudStatus = statusResponse.fraud_status;
-
-        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
-            try {
-                const { results: subRows } = await pool.prepare(
-                    `SELECT id, shop_id, package_id, billing_cycle 
-                     FROM subscriptions 
-                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
-                ).bind(orderId, orderId).all();
-
-                if (subRows && subRows.length > 0) {
-                    const sub = subRows[0];
-                    const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
-
-                    const { results: shopRows } = await pool.prepare(
-                        `SELECT subscription_until, max_transactions_monthly, package_id FROM shops WHERE id = ?`
-                    ).bind(sub.shop_id).all();
-
-                    const shop = shopRows[0];
-                    const hariIni = new Date();
-
-                    const { results: pkgRows } = await pool.prepare(
-                        'SELECT id, max_transactions_monthly FROM packages WHERE id = ?'
-                    ).bind(sub.package_id).all();
-                    const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
-                    const isNewSultan = (sub.package_id === 3);
-
-                    let newUntilDate = new Date();
-                    let newQuota = 0;
-
-                    if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
-                        const baseDate = new Date(shop.subscription_until);
-                        baseDate.setDate(baseDate.getDate() + daysToAdd);
-                        newUntilDate = baseDate;
-
-                        if (isNewSultan) {
-                            newQuota = 0;
-                        } else {
-                            const currentQuota = Math.max(0, parseInt(shop.max_transactions_monthly) || 0);
-                            newQuota = currentQuota + pkgMaxTx;
-                        }
-                    } else {
-                        const baseDate = new Date();
-                        baseDate.setDate(baseDate.getDate() + daysToAdd);
-                        newUntilDate = baseDate;
-
-                        newQuota = isNewSultan ? 0 : pkgMaxTx;
-                    }
-
-                    const startDateStr = hariIni.toISOString().split('T')[0];
-                    const newUntilStr = newUntilDate.toISOString().split('T')[0];
-
-                    await pool.prepare(
-                        `UPDATE shops 
-                        SET subscription_status = 'active', 
-                            subscription_until = ?, 
-                            package_id = ?, 
-                            billing_cycle = ?,
-                            max_transactions_monthly = ? 
-                        WHERE id = ?`
-                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
-
-                    await pool.prepare(
-                        `UPDATE subscriptions 
-                        SET status = 'active', 
-                            start_date = ?, 
-                            end_date = ?,
-                            max_transactions_monthly = ?
-                        WHERE id = ?`
-                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
-                }
-            } catch (err) {
-                console.error("Error update DB via Polling status:", err);
-            }
-        }
-
-        return c.json({
-            success: true,
-            order_id: orderId,
-            transaction_status: transactionStatus,
-            fraud_status: fraudStatus
-        });
-    } catch (error) {
-        console.error("Gagal cek status Midtrans:", error);
-        return c.json({ 
-            success: false, 
-            message: "Gagal memeriksa status pembayaran Midtrans." 
-        }, 500);
-    }
-});*/
-
+// Single Route Handler untuk Cek Status Midtrans
 app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
     try {
         const pool = getDbPool(c);
-        const snap = getSnapClient(c);
         const orderId = c.req.param('orderId');
+        const env = c.env;
+        const serverKey = env.MIDTRANS_SERVER_KEY || '';
+        const isProduction = env.MIDTRANS_IS_PRODUCTION === 'true';
 
-        const statusResponse = await snap.transaction.status(orderId);
+        const statusApiUrl = isProduction 
+            ? `https://api.midtrans.com/v2/${orderId}/status` 
+            : `https://api.sandbox.midtrans.com/v2/${orderId}/status`;
+
+        const authHeader = `Basic ${btoa(serverKey + ':')}`;
+
+        const midRes = await fetch(statusApiUrl, {
+            headers: {
+                'Accept': 'application/json',
+                'Authorization': authHeader
+            }
+        });
+
+        const statusResponse = await midRes.json();
         const transactionStatus = statusResponse.transaction_status;
         const fraudStatus = statusResponse.fraud_status;
 
@@ -1060,7 +915,7 @@ app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, asyn
         console.error("Gagal cek status Midtrans:", error);
         return c.json({ 
             success: false, 
-            message: "Gagal memeriksa status pembayaran Midtrans." 
+            message: "Gagal memeriksa status pembayaran Midtrans: " + error.message 
         }, 500);
     }
 });
@@ -1377,12 +1232,10 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
 
             let mimeType = file.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
 
-            // Simpan ke R2 via binding Worker
             await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
                 httpMetadata: { contentType: mimeType }
             });
 
-            // Simpan rute API internal ke Database
             const urlFoto = `/api/images/${uniqueFilename}`;
             qrisUrlQuery = ", qris_image_url = ?";
             params.push(urlFoto);
@@ -1404,13 +1257,13 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
         return c.json({ success: false, message: "Gagal menyimpan pengaturan toko: " + error.message }, 500);
     }
 });
+
 // ---------------- IMAGE PROXY SERVER (UNTUK SEMUA GAMBAR R2) ----------------
 app.get('/api/images/:key', async (c) => {
     try {
         const key = c.req.param('key');
         if (!key) return c.text('Key gambar tidak ditemukan', 400);
 
-        // Ambil objek gambar langsung dari R2 via internal binding
         const object = await c.env.R2_BUCKET.get(key);
         if (!object) {
             return c.text('Gambar tidak ditemukan di R2', 404);
@@ -1419,8 +1272,8 @@ app.get('/api/images/:key', async (c) => {
         const headers = new Headers();
         object.writeHttpMetadata(headers);
         headers.set('etag', object.httpEtag);
-        headers.set('Access-Control-Allow-Origin', '*'); // Bebas CORS di semua browser
-        headers.set('Cache-Control', 'public, max-age=31536000'); // Cache gambar 1 tahun
+        headers.set('Access-Control-Allow-Origin', '*');
+        headers.set('Cache-Control', 'public, max-age=31536000');
 
         return new Response(object.body, { headers });
     } catch (error) {
@@ -1618,125 +1471,8 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
     }
 });
 
-//di incative karena ganti server ke cloudeflare yang metode nya berbeda
-/*app.post('/api/payments/midtrans-notification', async (c) => {
-    try {
-        const pool = getDbPool(c);
-        const snap = getSnapClient(c);
-        const notification = await c.req.json();
-        
-        if (!notification || Object.keys(notification).length === 0) {
-            return c.json({ success: true, message: "Notification test received." });
-        }
-
-        const orderId = notification.order_id || '';
-
-        if (orderId.startsWith('BEDAORDER-') || orderId.startsWith('ORDER-')) {
-            try {
-                const response = await fetch('https://nodejs-pesan-antar-production.up.railway.app/api/payments/midtrans-notification', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(notification)
-                });
-                const resData = await response.json();
-                return c.json(resData, response.status);
-            } catch (fwdError) {
-                return c.json({ success: true, message: "Forwarding failed but acknowledged." });
-            }
-        }
-
-        if (orderId.startsWith('payment_notif_test')) {
-            return c.json({ success: true, message: "Test notification standard processed." });
-        }
-
-        const statusResponse = await snap.transaction.notification(notification);
-        const transactionStatus = statusResponse.transaction_status;
-        const fraudStatus = statusResponse.fraud_status;
-
-        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
-            try {
-                const { results: subRows } = await pool.prepare(
-                    `SELECT id, shop_id, package_id, billing_cycle 
-                     FROM subscriptions 
-                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
-                ).bind(orderId, orderId).all();
-
-                if (subRows && subRows.length > 0) {
-                    const sub = subRows[0];
-                    const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
-
-                    const { results: shopRows } = await pool.prepare(
-                        `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ?`
-                    ).bind(sub.shop_id).all();
-
-                    const { results: pkgRows } = await pool.prepare(
-                        `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`
-                    ).bind(sub.package_id).all();
-
-                    const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
-                    const isNewSultan = (sub.package_id === 3);
-                    const shop = shopRows[0];
-                    const hariIni = new Date();
-
-                    let newUntilDate = new Date();
-                    let newQuota = 0;
-
-                    if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
-                        const baseDate = new Date(shop.subscription_until);
-                        baseDate.setDate(baseDate.getDate() + daysToAdd);
-                        newUntilDate = baseDate;
-
-                        if (isNewSultan) {
-                            newQuota = 0;
-                        } else {
-                            const currentQuota = Math.max(0, parseInt(shop.max_transactions_monthly) || 0);
-                            newQuota = currentQuota + pkgMaxTx;
-                        }
-                    } else {
-                        const baseDate = new Date();
-                        baseDate.setDate(baseDate.getDate() + daysToAdd);
-                        newUntilDate = baseDate;
-
-                        newQuota = isNewSultan ? 0 : pkgMaxTx;
-                    }
-
-                    const startDateStr = hariIni.toISOString().split('T')[0];
-                    const newUntilStr = newUntilDate.toISOString().split('T')[0];
-
-                    await pool.prepare(
-                        `UPDATE shops 
-                        SET subscription_status = 'active', 
-                            subscription_until = ?, 
-                            package_id = ?, 
-                            billing_cycle = ?,
-                            max_transactions_monthly = ? 
-                        WHERE id = ?`
-                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
-
-                    await pool.prepare(
-                        `UPDATE subscriptions 
-                        SET status = 'active', 
-                            start_date = ?, 
-                            end_date = ?,
-                            max_transactions_monthly = ?
-                        WHERE id = ?`
-                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
-                }
-            } catch (err) {
-                console.error("Gagal update DB saat notification:", err.message);
-            }
-        }
-
-        return c.json({ success: true });
-    } catch (error) {
-        console.error("Error Webhook Midtrans:", error);
-        return c.json({ success: false, message: error.message });
-    }
-});*/
-
 // ---------------- MIDTRANS NOTIFICATION WEBHOOK ----------------
 app.all('/api/payments/midtrans-notification', async (c) => {
-    // 1. Cek langsung HTTP Method. Jika GET (buka via browser), langsung kembalikan respon tanpa parsing JSON
     if (c.req.method === 'GET') {
         return c.json({ 
             success: true, 
@@ -2308,93 +2044,9 @@ app.post('/api/tanya-ai', async (c) => {
         Kamu adalah Asisten BEDA. Tugasmu membantu pemilik warung/usaha terkait settingan warung, QRIS, kelola stok, dan proses transaksi. Jawab dengan bahasa ramah, sopan, dan solutif. Jika ada kendala teknis darurat, sarankan hubungi WhatsApp Admin BEDApos di 089525147422 atau email support@bedadigital.app .
         ATURAN GAYA MENJAWAB (SANGAT PENTING):
         1. Jawab secara RINGKAS, PADAT, dan LANGSUNG KE INTI (Maksimal 2 - 3 kalimat).
-        2. DILARANG menggunakan basa-basi pembuka yang panjang (seperti "Halo! Senang sekali bisa membantu Anda...").
+        2. DILARANG menggunakan basa-basi pembuka yang panjang.
         3. Jangan gunakan poin-poin panjang kecuali diminta secara spesifik oleh pengguna.
         4. Gunakan bahasa Indonesia sehari-hari yang ramah, sopan, dan mudah dipahami pemilik warung.
-        Informasi Penting :
-        - untuk pendafaran klik tombol Daftar Sekarang di web bedapos.bedadigital.app
-        - Ada live demo nya,  klik tombol Live Demo POS (login nya no.HP: 012345678 password: demo123)
-        - Pendaftaran gratis trial 14 hari via bedapos.bedadigital.app.
-        - Uang hasil penjualan 100% masuk ke rekening/QRIS pribadi pemilik warung (0% komisi).
-        - Untuk tata cara penggunakan bisa dilihat di panduan
-        Informasi tambahan :
-        - BEDApos cukup diakses via browser HP/Laptop tanpa perlu install aplikasi.
-        - Uang pembayaran dari pelanggan akan langsung masuk ke rekening bank atau QRIS pribadi milik Anda sendiri tanpa melalui pihak ketiga.
-        - kalau butuh panduan tata cara, klik tombol PANDUAN di web ini
-        
-        Apa yang harus dilakukan setelah daftar.
-        1.	Masuk ke Alamat web https://pos.bedadigital.app/login.html , lakukan login
-        2.	Masuk ke Pengaturan, kalau dari HP,klik tombol titik 3, klik pengaturan
-        3.	Setting yang diperlukan
-        -	Ada Kena Pajak?, ceklis kalau memang ada pajak, ketik nilai persen pajaknya, kasih 0 jika barang/jasa mu sudah termasuk pajak. Kalau usaha mu belum ada pajak maka biarkan tidak ter ceklis.
-        -	Hitung Stok Otomatis?, ini berlaku untuk paket Juragan dan Sultan, ceklis,jika transaksi barang mu ada pengecekan stok, sehingga stok yang sudah 0 tidak bisa di transaksi. Ceklis nya hilangkan jika memang belum siap untuk menerapkan hitung stok otomatis. Untuk paket UMKM hitung stok otomatis tidak ada, jadi murni transaksi tanpa melihat stok.
-        -	Diskon standard toko (%), ini diisi apabila anda memberikan diskon di setiap transaksi yang terjadi, misalkan pada waktu-waktu tertentu, maka apabila ini diisi, setiap transaksi yang terjadi akan terpotong discount ini. Jika sudah tidak diperlukan lagi diskon ini, maka isi dengan angka 0.
-        -	Rincian Akun bank, Isi no. rekening usaha anda disini, supaya nanti di kasir bisa langsung dilihat no. rekening nya apabila ada yang menggunakan metode pembayaran transfer.
-        -	Ganti foto QRIS, jika memiliki QIRS, upload gambar QRIS mu disitu, sehingga di kasir bisa langsung tampil dan bisa langsung di scan.
-        -	Klik simpan kalau sudah selesai.
-        4.	Kelola Produk, Jika menggunakan HP, didashboard, klik tombol titik 3,klik Kelola Produk
-        -	Export Excel, untuk export ke excel daftar produk dan stok terakhir usaha anda.
-        -	Kategori , setting kategori-kategori produk usaha anda, misalkan kategori BARANG, JASA, atau lebih spesifik lagi, MAKANAN, MINUMAN, SPAREPART, JASA.
-        -	Tambah Produk Baru, untuk menambah produk baru
-
-        Untuk barcode itu opsional,bisa langsung discan dari HP nya, dengan klik tombol gambar kamera. Harga Modal/HPP isi untuk menentukan rugi laba. Stok isi apabila menggunakan hitung stok otomatis.
-        Proses Transaksi di aplikasi POS
-        1.	Transaksi POS,klik tombol POS di dashboar.
-        2.	list katalog produk nya, bisa scan barcode pake HP dengan klik tombol gambar kamera di pojok pencarian barang.
-        3.	Ini Keranjang untuk proses pembayaran,pembayaran bisa Tunai, QRIS dan Transfer. Untuk QRIS dan Transfer harus di upload atau di foto bukti bayarnya, langsung dari HP untuk foto bukti bayar nya. Ketika klik proses Order, maka akan muncul struk. 
-        4.	Pembayaran QRIS, upload/foto bukti bayar
-        5.	Pembayaran Transfer,upload / foto bukti bayar
-       
-
-        Cara Sambungkan ke Printer Bluetooth
-        Panduan menghubungkan aplikasi ke printer thermal Bluetooth
-        1. Aktifkan Bluetooth & Hubungkan Printer ke HP
-        Pastikan printer sudah menyala dan Bluetooth di HP Anda sudah aktif. Scan/cari perangkat printer hingga muncul dan terhubung ke HP Anda.
-        Passcode umum: 0000
-        2.Instal Aplikasi RawBT
-        Instal aplikasi RawBT inkless print service (gratis) melalui Google Play Store.
-        3. Buka Pengaturan RawBT
-        Buka aplikasi RawBT, lalu klik ikon Setting (Pengaturan).
-        4. Tambah Printer (ADD PRINTER)
-        Pada menu Settings, klik tombol ADD PRINTER
-        5. Pilih Metode Bluetooth
-        Pilih metode koneksi Bluetooth
-        Pilih Koneksi Bluetooth
-        6. Pilih Perangkat Printer
-        Klik opsi not selected Pilih nama printer Bluetooth Anda (misal: RPP02N). Jika belum muncul, klik tombol SCANNING DEVICE
-        7. Hubungkan Printer (CONNECT)
-        Setelah perangkat printer dipilih, klik tombol CONNECT untuk menyelesaikan penyambungan.
-    
-        Paket
-        UMKM
-        Rp 25.000 / bulan
-        atau Rp 225.000 / tahun
-        - Maksimal 600 Transaksi/Bulan
-        - Unlimited Produk
-        - Cetak Struk Kasir
-        - Laporan Penjualan + Export to Excel
-
-        JURAGAN
-        Rp 99.000 / bulan
-        atau Rp 999.000 / tahun
-        - Maksimal 3.000 Transaksi/Bulan
-        - Unlimited Produk
-        - Cetak Struk Kasir
-        - Manajemen Stok
-        - Hitung otomatis Harga HPP
-        - Laporan Penjualan + Export Excel
-        - Laporan Laba Rugi
-
-        SULTAN
-        Rp 211.000 / bulan
-        atau Rp 2.110.000 / tahun
-        - Transaksi Tanpa Batas (Unlimited)
-        - Unlimited Produk
-        - Cetak Struk Kasir
-        - Manajemen Stok
-        - Hitung otomatis Harga HPP
-        - Laporan Penjualan + Export Excel
-        - Laporan Laba Rugi
         `;
 
         const contentsPayload = [];
