@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = [ "nodejs_compat" ]
 
-# Binding Database D1 SQLite 
+# Binding Database D1 SQLite.
 [[d1_databases]]
 binding = "beda_pos"
 database_name = "beda_pos"
