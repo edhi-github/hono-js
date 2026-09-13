@@ -9,6 +9,11 @@ binding = "beda_pos"
 database_name = "beda_pos"
 database_id = "9acf87ab-5048-43fd-90fc-88862e0b6b7f"
 
+[[d1_databases]]
+binding = "beda"
+database_name = "beda"
+database_id = "f42829ca-f68d-4d1d-8eeb-7a2c78494f68" 
+
 # Bindings R2 Bucket (sesuai nama bucket di Cloudflare R2 Anda)
 [[r2_buckets]]
 binding = "R2_BUCKET"

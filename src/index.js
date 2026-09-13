@@ -1316,6 +1316,7 @@ app.get('/api/orders/details/:orderId', verifikasiAksesWarung, async (c) => {
 });
 
 app.post('/api/register', async (c) => {
+    const smspool = c.env.beda;
     const pool = getDbPool(c);
     const body = await c.req.json();
     const { owner_name, shop_name, slug, username, password, package_id, billing_cycle, wilayah, is_terms_agreed } = body;
@@ -1368,7 +1369,7 @@ app.post('/api/register', async (c) => {
 
         const smsMessage = `Kami dari BEDApos, ${shop_name} (TRIAL 14hr), Link Aplikasi: pos.bedadigital.app/login.html `;
    
-        await pool.prepare(
+        await smspool.prepare(
             `INSERT INTO sms_queue (phone, message, status, retry_count) VALUES (?, ?, 'PENDING', 0)`
         ).bind(username, smsMessage).run();
 
