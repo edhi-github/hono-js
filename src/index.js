@@ -1504,7 +1504,7 @@ app.post('/api/payments/midtrans-notification', async (c) => {
         // Forwarding jika transaksi berasal dari sistem lain (Pesan Antar)
         if (orderId.startsWith('BEDAORDER-') || orderId.startsWith('ORDER-')) {
             try {
-                await fetch('https://nodejs-pesan-antar-production.up.railway.app/api/payments/midtrans-notification', {
+                await fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(notification)
