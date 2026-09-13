@@ -16,21 +16,7 @@ app.use('*', cors({
     allowHeaders: ['Content-Type', 'Authorization', 'x-shop-slug', 'x-shop-id', 'Accept']
 }));
 
-// Helper untuk koneksi MySQL Database Pool
-/*function getDbPool(c) {
-    const env = c.env;
-    return mysql.createPool({
-        host: env.MYSQLHOST,
-        user: env.MYSQLUSER,
-        password: env.MYSQLPASSWORD,
-        database: env.MYSQL_DATABASE,
-        port: env.MYSQLPORT ? parseInt(env.MYSQLPORT) : 3306,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0
-    });
-}*/
-
+// Helper untuk koneksi Cloudflare D1 Database
 function getDbPool(c) {
    return c.env.beda_pos; 
 }
@@ -58,10 +44,10 @@ function getSnapClient(c) {
     });
 }
 
-async function getShopIdBySlug(connectionOrPool, slug) {
+async function getShopIdBySlug(db, slug) {
     if (!slug) return null;
-    const [rows] = await connectionOrPool.query('SELECT id FROM shops WHERE slug = ?', [slug]);
-    return rows.length > 0 ? rows[0].id : null;
+    const { results } = await db.prepare('SELECT id FROM shops WHERE slug = ?').bind(slug).all();
+    return results && results.length > 0 ? results[0].id : null;
 }
 
 // Middleware Verifikasi Akses Warung
@@ -102,15 +88,14 @@ async function cekMasaAktifSub(c, next) {
             return c.json({ success: false, message: "Shop ID atau Parameter Shop tidak ditemukan/valid" }, 400);
         }
 
-        const [shops] = await pool.query(
+        const { results: shops } = await pool.prepare(
             `SELECT s.subscription_until, s.max_transactions_monthly, s.package_id, p.slug AS package_slug 
              FROM shops s 
              LEFT JOIN packages p ON s.package_id = p.id 
-             WHERE s.id = ?`, 
-            [shopId]
-        );
+             WHERE s.id = ?`
+        ).bind(shopId).all();
 
-        if (shops.length === 0) {
+        if (!shops || shops.length === 0) {
             return c.json({ success: false, message: "Toko tidak ditemukan" }, 404);
         }
 
@@ -128,7 +113,7 @@ async function cekMasaAktifSub(c, next) {
 
         if (isExpiredByDate || isQuotaExhausted) {
             if (isExpiredByDate && shop.max_transactions_monthly > 0) {
-                await pool.query("UPDATE shops SET max_transactions_monthly = 0, subscription_status = 'expired' WHERE id = ?", [shopId]);
+                await pool.prepare("UPDATE shops SET max_transactions_monthly = 0, subscription_status = 'expired' WHERE id = ?").bind(shopId).run();
             }
 
             const pesanError = isExpiredByDate 
@@ -176,13 +161,12 @@ app.get('/api/shops/info', verifikasiAksesWarung, async (c) => {
     try {
         const pool = getDbPool(c);
         const shopSlug = c.req.query('shop') || c.req.header('x-shop-slug');
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT id, shop_name, has_tax, tax_percentage, discount_percentage, show_cash_payment, bank_rekening_info, qris_image_url 
-             FROM shops WHERE slug = ?`, 
-            [shopSlug]
-        );
+             FROM shops WHERE slug = ?`
+        ).bind(shopSlug).all();
 
-        if (rows.length === 0) {
+        if (!rows || rows.length === 0) {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
@@ -196,7 +180,6 @@ app.get('/api/shops/info', verifikasiAksesWarung, async (c) => {
 // ---------------- PRODUK & STOK ----------------
 app.post('/api/products/add-stock', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
     const pool = getDbPool(c);
-    const connection = await pool.getConnection();
     try {
         const body = await c.req.json();
         const shopSlug = body.shop || c.req.query('shop') || c.req.header('x-shop-slug');
@@ -217,12 +200,10 @@ app.post('/api/products/add-stock', verifikasiAksesWarung, cekMasaAktifSub, asyn
             }, 400);
         }
 
-        const shopId = await getShopIdBySlug(connection, shopSlug);
+        const shopId = await getShopIdBySlug(pool, shopSlug);
         if (!shopId) {
             return c.json({ success: false, message: 'Warung tidak ditemukan.' }, 404);
         }
-
-        await connection.beginTransaction();
 
         const totalBeliItem = qty * buyPrice;
         const totalBiayaTambahanPO = taxPO + otherCostPO;
@@ -230,13 +211,11 @@ app.post('/api/products/add-stock', verifikasiAksesWarung, cekMasaAktifSub, asyn
         const bebanTambahanPerPcs = qty > 0 ? ((bobotItem * totalBiayaTambahanPO) / qty) : 0;
         const effectiveBuyPrice = buyPrice + bebanTambahanPerPcs;
 
-        const [prodRows] = await connection.query(
-            'SELECT id, stock, cost_price, name FROM products WHERE id = ? AND shop_id = ? FOR UPDATE',
-            [productId, shopId]
-        );
+        const { results: prodRows } = await pool.prepare(
+            'SELECT id, stock, cost_price, name FROM products WHERE id = ? AND shop_id = ?'
+        ).bind(productId, shopId).all();
 
-        if (prodRows.length === 0) {
-            await connection.rollback();
+        if (!prodRows || prodRows.length === 0) {
             return c.json({ success: false, message: 'Produk tidak ditemukan.' }, 404);
         }
 
@@ -253,15 +232,13 @@ app.post('/api/products/add-stock', verifikasiAksesWarung, cekMasaAktifSub, asyn
             newCostPrice = Math.round(effectiveBuyPrice);
         }
 
-        await connection.query('UPDATE products SET stock = ?, cost_price = ? WHERE id = ?', [newStock, newCostPrice, productId]);
+        await pool.prepare('UPDATE products SET stock = ?, cost_price = ? WHERE id = ?').bind(newStock, newCostPrice, productId).run();
 
-        await connection.query(
+        await pool.prepare(
             `INSERT INTO stock_mutations (shop_id, product_id, type, qty, buy_price, subtotal_po, tax_po, other_cost_po, unit_cost, stock_before, stock_after, reference_number, notes) 
-             VALUES (?, ?, 'IN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [shopId, productId, qty, effectiveBuyPrice, subtotalPO, taxPO, otherCostPO, newCostPrice, currentStock, newStock, `RESTOCK-${Date.now()}`, notes]
-        );
+             VALUES (?, ?, 'IN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(shopId, productId, qty, effectiveBuyPrice, subtotalPO, taxPO, otherCostPO, newCostPrice, currentStock, newStock, `RESTOCK-${Date.now()}`, notes).run();
 
-        await connection.commit();
         return c.json({
             success: true,
             message: `Stok bertambah +${qty}. HPP Efektif: Rp ${Math.round(effectiveBuyPrice).toLocaleString('id-ID')} | HPP Rata-rata baru: Rp ${newCostPrice.toLocaleString('id-ID')}`,
@@ -269,11 +246,8 @@ app.post('/api/products/add-stock', verifikasiAksesWarung, cekMasaAktifSub, asyn
             new_cost_price: newCostPrice
         });
     } catch (error) {
-        await connection.rollback();
         console.error('Error tambah stok:', error);
         return c.json({ success: false, message: 'Gagal menambah stok: ' + error.message }, 500);
-    } finally {
-        connection.release();
     }
 });
 
@@ -286,13 +260,12 @@ app.get('/api/products', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT id, name, barcode, price, cost_price, discount_percentage, category, image_url, description, is_available, stock 
             FROM products 
             WHERE shop_id = ? AND is_active = 1 
-            ORDER BY category ASC, name ASC`,
-            [shopId]
-        );
+            ORDER BY category ASC, name ASC`
+        ).bind(shopId).all();
 
         return c.json({ success: true, data: rows });
     } catch (error) {
@@ -324,29 +297,26 @@ app.post('/api/products', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
         let urlFoto = '';
         const file = body.foto_produk;
         if (file && typeof file === 'object' && file.name) {
-            const fileExtension = file.name.split('.').pop();
+            const fileExtension = file.name.split('.').pop().toLowerCase();
             const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await file.arrayBuffer();
+            const binaryData = new Uint8Array(arrayBuffer);
 
-            const uploadParams = {
-                Bucket: c.env.R2_BUCKET_NAME,
-                Key: uniqueFilename,
-                Body: Buffer.from(arrayBuffer), 
-                ContentType: file.type || 'image/jpeg',
-            };
+            let mimeType = file.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
 
-            await s3.send(new PutObjectCommand(uploadParams));
-            urlFoto = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+                httpMetadata: { contentType: mimeType }
+            });
+            urlFoto = `/api/images/${uniqueFilename}`;
         }
 
         const inputStock = stock !== undefined && stock !== '' ? parseInt(stock) : 20;
         const discount_percentage = parseFloat(body.discount_percentage) || 0;
 
-        const queryText = `
+        await pool.prepare(`
             INSERT INTO products (shop_id, name, barcode, price, cost_price, discount_percentage, category, description, image_url, stock) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `;
-        await pool.query(queryText, [shopId, nama_produk, barcode, harga, cost_price, discount_percentage, kategori, deskripsi, urlFoto, inputStock]);
+        `).bind(shopId, nama_produk, barcode, harga, cost_price, discount_percentage, kategori, deskripsi, urlFoto, inputStock).run();
         
         return c.json({
             success: true,
@@ -382,37 +352,33 @@ app.post('/api/products/:id', verifikasiAksesWarung, cekMasaAktifSub, async (c) 
             return c.json({ success: false, message: 'Nama, harga, dan kategori wajib diisi.' }, 400);
         }
 
-        const [existingProduct] = await pool.query('SELECT image_url FROM products WHERE id = ?', [productId]);
-        if (existingProduct.length === 0) {
+        const { results: existingProduct } = await pool.prepare('SELECT image_url FROM products WHERE id = ?').bind(productId).all();
+        if (!existingProduct || existingProduct.length === 0) {
             return c.json({ success: false, message: 'Produk tidak ditemukan.' }, 404);
         }
-
         let urlFoto = existingProduct[0].image_url;
         const file = body.foto_produk;
 
         if (file && typeof file === 'object' && file.name) {
-            const fileExtension = file.name.split('.').pop();
+            const fileExtension = file.name.split('.').pop().toLowerCase();
             const uniqueFilename = `product-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await file.arrayBuffer();
+            const binaryData = new Uint8Array(arrayBuffer);
 
-            const uploadParams = {
-                Bucket: c.env.R2_BUCKET_NAME,
-                Key: uniqueFilename,
-                Body: Buffer.from(arrayBuffer), 
-                ContentType: file.type || 'image/jpeg',
-            };
+            let mimeType = file.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
 
-            await s3.send(new PutObjectCommand(uploadParams));
-            urlFoto = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+                httpMetadata: { contentType: mimeType }
+            });
+            urlFoto = `/api/images/${uniqueFilename}`;
         }
 
         const discount_percentage = parseFloat(body.discount_percentage) || 0;
-        const queryText = `
+        await pool.prepare(`
             UPDATE products 
             SET name = ?, barcode = ?, price = ?, cost_price = ?, discount_percentage = ?, category = ?, description = ?, image_url = ?, stock = ?
             WHERE id = ?
-        `;
-        await pool.query(queryText, [name, barcode, parseFloat(price), cost_price, discount_percentage, category, description, urlFoto, parsedStock, productId]);    
+        `).bind(name, barcode, parseFloat(price), cost_price, discount_percentage, category, description, urlFoto, parsedStock, productId).run();    
         
         return c.json({
             success: true,
@@ -436,13 +402,12 @@ app.get('/api/products/export-excel', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: 'Warung tidak ditemukan.' }, 404);
         }
 
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT barcode, name, category, cost_price, price, discount_percentage, stock, description
              FROM products 
              WHERE shop_id = ? AND is_active = 1 
-             ORDER BY category ASC, name ASC`,
-            [shopId]
-        );
+             ORDER BY category ASC, name ASC`
+        ).bind(shopId).all();
 
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Master Produk');
@@ -500,14 +465,13 @@ app.get('/api/products/:id', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT id, name, barcode, price, cost_price, discount_percentage, category, image_url, description, is_available, stock 
             FROM products 
-            WHERE id = ? AND shop_id = ? AND is_active = 1`,
-            [productId, shopId]
-        );
+            WHERE id = ? AND shop_id = ? AND is_active = 1`
+        ).bind(productId, shopId).all();
 
-        if (rows.length === 0) {
+        if (!rows || rows.length === 0) {
             return c.json({ success: false, message: "Produk tidak ditemukan." }, 404);
         }
 
@@ -533,10 +497,9 @@ app.get('/api/categories', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: "Warung tidak ditemukan.", data: [] }, 404);
         }
 
-        const [rows] = await pool.query(
-            `SELECT id, name FROM categories WHERE shop_id = ? AND is_active = 1 ORDER BY name ASC`,
-            [shopId]
-        );
+        const { results: rows } = await pool.prepare(
+            `SELECT id, name FROM categories WHERE shop_id = ? AND is_active = 1 ORDER BY name ASC`
+        ).bind(shopId).all();
 
         return c.json({ success: true, data: rows });
     } catch (error) {
@@ -561,10 +524,9 @@ app.post('/api/categories', verifikasiAksesWarung, cekMasaAktifSub, async (c) =>
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        await pool.query(
-            `INSERT INTO categories (shop_id, name, is_active) VALUES (?, ?, 1)`,
-            [shopId, name.trim()]
-        );
+        await pool.prepare(
+            `INSERT INTO categories (shop_id, name, is_active) VALUES (?, ?, 1)`
+        ).bind(shopId, name.trim()).run();
 
         return c.json({ success: true, message: "Kategori berhasil ditambahkan." }, 201);
     } catch (error) {
@@ -584,10 +546,9 @@ app.put('/api/categories/:id', verifikasiAksesWarung, cekMasaAktifSub, async (c)
             return c.json({ success: false, message: "Nama kategori tidak boleh kosong." }, 400);
         }
 
-        await pool.query(
-            `UPDATE categories SET name = ? WHERE id = ?`,
-            [name.trim(), categoryId]
-        );
+        await pool.prepare(
+            `UPDATE categories SET name = ? WHERE id = ?`
+        ).bind(name.trim(), categoryId).run();
 
         return c.json({ success: true, message: "Kategori berhasil diperbarui." });
     } catch (error) {
@@ -600,7 +561,7 @@ app.delete('/api/categories/:id', verifikasiAksesWarung, cekMasaAktifSub, async 
     try {
         const pool = getDbPool(c);
         const categoryId = parseInt(c.req.param('id'));
-        await pool.query(`UPDATE categories SET is_active = 0 WHERE id = ?`, [categoryId]);
+        await pool.prepare(`UPDATE categories SET is_active = 0 WHERE id = ?`).bind(categoryId).run();
         return c.json({ success: true, message: "Kategori berhasil dihapus." });
     } catch (error) {
         console.error("Error hapus kategori:", error);
@@ -612,7 +573,6 @@ app.delete('/api/categories/:id', verifikasiAksesWarung, cekMasaAktifSub, async 
 app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
     const pool = getDbPool(c);
     const s3 = getS3Client(c);
-    const connection = await pool.getConnection();
 
     try {
         const body = await c.req.parseBody();
@@ -630,7 +590,7 @@ app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
             cart = JSON.parse(cart);
         }
 
-        const shopId = await getShopIdBySlug(connection, shopSlug);
+        const shopId = await getShopIdBySlug(pool, shopSlug);
         if (!shopId) {
             return c.json({ success: false, message: "Warung/Toko tidak ditemukan atau tidak valid." }, 404);
         }
@@ -657,102 +617,71 @@ app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
         let urlBuktiBayar = null;
         const proofFile = body.payment_proof;
         if (proofFile && typeof proofFile === 'object' && proofFile.name) {
-            const fileExtension = proofFile.name.split('.').pop();
+            const fileExtension = proofFile.name.split('.').pop().toLowerCase();
             const uniqueFilename = `proof-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await proofFile.arrayBuffer();
+            const binaryData = new Uint8Array(arrayBuffer);
 
-            await s3.send(new PutObjectCommand({
-                Bucket: c.env.R2_BUCKET_NAME,
-                Key: uniqueFilename,
-                Body: Buffer.from(arrayBuffer), 
-                ContentType: proofFile.type || 'image/jpeg',
-            }));
-            urlBuktiBayar = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            let mimeType = proofFile.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
+
+            await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+                httpMetadata: { contentType: mimeType }
+            });
+            urlBuktiBayar = `/api/images/${uniqueFilename}`;
         }
 
-        const [shopRows] = await connection.query(
-            'SELECT package_id, is_stock_calculated FROM shops WHERE id = ?',
-            [shopId]
-        );
+        const { results: shopRows } = await pool.prepare(
+            'SELECT package_id, is_stock_calculated FROM shops WHERE id = ?'
+        ).bind(shopId).all();
         
         const currentShop = shopRows[0];
         const isEligiblePackage = (currentShop.package_id === 2 || currentShop.package_id === 3);
         const checkStockActive = isEligiblePackage && (currentShop.is_stock_calculated === 1);
 
-        await connection.beginTransaction();
-
         if (checkStockActive) {
             const productIds = cart.map(item => item.id);
-            const [pRows] = await connection.query(
-                `SELECT id, stock FROM products WHERE id IN (?) AND shop_id = ? FOR UPDATE`,
-                [productIds, shopId]
-            );
+            const placeholders = productIds.map(() => '?').join(',');
+            const { results: pRows } = await pool.prepare(
+                `SELECT id, stock FROM products WHERE id IN (${placeholders}) AND shop_id = ?`
+            ).bind(...productIds, shopId).all();
 
             const stockMap = new Map();
             pRows.forEach(p => stockMap.set(p.id, p.stock));
-
-            const cases = [];
-            const updateParams = [];
-            const mutationRows = [];
 
             for (const item of cart) {
                 const oldStock = stockMap.get(item.id) || 0;
                 const newStock = oldStock - item.qty;
 
-                cases.push('WHEN id = ? THEN ?');
-                updateParams.push(item.id, newStock);
+                await pool.prepare('UPDATE products SET stock = ? WHERE id = ? AND shop_id = ?')
+                    .bind(newStock, item.id, shopId).run();
 
-                mutationRows.push([
-                    shopId, item.id, 'OUT', item.qty, oldStock, newStock, invoiceNumber, 'Penjualan POS'
-                ]);
+                await pool.prepare(
+                    `INSERT INTO stock_mutations (shop_id, product_id, type, qty, stock_before, stock_after, reference_number, notes) VALUES (?, ?, 'OUT', ?, ?, ?, ?, 'Penjualan POS')`
+                ).bind(shopId, item.id, item.qty, oldStock, newStock, invoiceNumber).run();
             }
-
-            updateParams.push(productIds, shopId);
-            await connection.query(
-                `UPDATE products SET stock = CASE ${cases.join(' ')} END WHERE id IN (?) AND shop_id = ?`,
-                updateParams
-            );
-
-            await connection.query(
-                `INSERT INTO stock_mutations (shop_id, product_id, type, qty, stock_before, stock_after, reference_number, notes) VALUES ?`,
-                [mutationRows]
-            );
         }
 
         const changeAmount = numericPayment - numericTotal;
         const discount_percentage = parseFloat(body.discount_percentage) || 0;
 
-        const [orderResult] = await connection.query(
+        const orderResult = await pool.prepare(
             `INSERT INTO orders (invoice_number, customer_name, shop_id, payment_method, subtotal, discount, discount_percentage, tax, total, payment, \`change\`, payment_proof_url, status) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed')`,
-            [invoiceNumber, customer_name, shopId, payment_method, numericSubtotal, numericDiscount, discount_percentage, numericTax, numericTotal, numericPayment, changeAmount, urlBuktiBayar]
-        );
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed')`
+        ).bind(invoiceNumber, customer_name, shopId, payment_method, numericSubtotal, numericDiscount, discount_percentage, numericTax, numericTotal, numericPayment, changeAmount, urlBuktiBayar).run();
 
-        const orderId = orderResult.insertId;
+        const orderId = orderResult.meta.last_row_id;
 
-        const orderDetailsData = cart.map(item => [
-            orderId,
-            item.id,
-            item.name,
-            item.price,
-            parseFloat(item.cost_price || item.hpp) || 0,
-            item.qty,
-            item.price * item.qty
-        ]);
-
-        await connection.query(
-            `INSERT INTO order_details (order_id, product_id, product_name, price, cost_price, qty, subtotal) VALUES ?`,
-            [orderDetailsData]
-        );
-
-        if (!isEligiblePackage || currentShop.package_id !== 3) {
-            await connection.query(
-                'UPDATE shops SET max_transactions_monthly = GREATEST(0, max_transactions_monthly - 1) WHERE id = ?',
-                [shopId]
-            );
+        for (const item of cart) {
+            await pool.prepare(
+                `INSERT INTO order_details (order_id, product_id, product_name, price, cost_price, qty, subtotal) VALUES (?, ?, ?, ?, ?, ?, ?)`
+            ).bind(orderId, item.id, item.name, item.price, parseFloat(item.cost_price || item.hpp) || 0, item.qty, item.price * item.qty).run();
         }
 
-        await connection.commit();
+        if (!isEligiblePackage || currentShop.package_id !== 3) {
+            await pool.prepare(
+                'UPDATE shops SET max_transactions_monthly = MAX(0, max_transactions_monthly - 1) WHERE id = ?'
+            ).bind(shopId).run();
+        }
 
         return c.json({
             success: true,
@@ -775,11 +704,8 @@ app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
         });
 
     } catch (error) {
-        await connection.rollback();
         console.error("Error checkout POS:", error);
         return c.json({ success: false, message: "Gagal memproses transaksi: " + error.message }, 500);
-    } finally {
-        connection.release();
     }
 });
 
@@ -787,7 +713,7 @@ app.post('/api/checkout', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
 app.get('/api/packages', async (c) => {
     try {
         const pool = getDbPool(c);
-        const [rows] = await pool.query('SELECT * FROM packages WHERE is_active = 1 ORDER BY price_monthly ASC');
+        const { results: rows } = await pool.prepare('SELECT * FROM packages WHERE is_active = 1 ORDER BY price_monthly ASC').all();
         return c.json({ success: true, data: rows });
     } catch (error) {
         console.error("Error ambil daftar paket:", error);
@@ -795,9 +721,9 @@ app.get('/api/packages', async (c) => {
     }
 });
 
-app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
+//pake railway jalan, tapi pake cloudflare ga jalan, ganti pake yg dibawah
+/*app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
     const pool = getDbPool(c);
-    const connection = await pool.getConnection();
     try {
         const snap = getSnapClient(c);
         const body = await c.req.json();
@@ -807,11 +733,11 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
             return c.json({ success: false, message: "Paket dan siklus tagihan wajib dipilih." }, 400);
         }
 
-        const shopId = await getShopIdBySlug(connection, shop);
+        const shopId = await getShopIdBySlug(pool, shop);
         if (!shopId) return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
 
-        const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [package_id]);
-        if (pkgRows.length === 0) return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
+        const { results: pkgRows } = await pool.prepare('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?').bind(package_id).all();
+        if (!pkgRows || pkgRows.length === 0) return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
 
         const pkg = pkgRows[0];
         const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
@@ -832,18 +758,13 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
         };
 
         const transaction = await snap.createTransaction(parameter);
-
-        await connection.beginTransaction();
         const startDateStr = new Date().toISOString().split('T')[0];
 
-        await connection.query(
+        await pool.prepare(
             `INSERT INTO subscriptions 
             (order_id, shop_id, package_id, package_name, amount, start_date, end_date, status, payment_proof_url, billing_cycle) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-            [orderId, shopId, parseInt(package_id), `${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, startDateStr, orderId, cycle]
-        );
-
-        await connection.commit();
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        ).bind(orderId, shopId, parseInt(package_id), `${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, startDateStr, orderId, cycle).run();
 
         return c.json({
             success: true,
@@ -852,15 +773,101 @@ app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => 
             snap_token: transaction.token
         });
     } catch (error) {
-        await connection.rollback();
         console.error("Error generate Midtrans Snap:", error);
         return c.json({ success: false, message: "Gagal membuat transaksi Midtrans: " + error.message }, 500);
-    } finally {
-        connection.release();
+    }
+});*/
+
+app.post('/api/shops/create-midtrans-qris', verifikasiAksesWarung, async (c) => {
+    const pool = getDbPool(c);
+    try {
+        const body = await c.req.json();
+        const { shop, package_id, billing_cycle } = body;
+
+        if (!package_id || !billing_cycle) {
+            return c.json({ success: false, message: "Paket dan siklus tagihan wajib dipilih." }, 400);
+        }
+
+        const shopId = await getShopIdBySlug(pool, shop);
+        if (!shopId) return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
+
+        const { results: pkgRows } = await pool.prepare('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?').bind(package_id).all();
+        if (!pkgRows || pkgRows.length === 0) return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
+
+        const pkg = pkgRows[0];
+        const cycle = billing_cycle === 'yearly' ? 'yearly' : 'monthly';
+        const amount = cycle === 'yearly' ? pkg.price_yearly : pkg.price_monthly;
+        const orderId = `SUB-${shopId}-${Date.now()}`;
+
+        // Ambil env variable
+        const env = c.env;
+        const serverKey = env.MIDTRANS_SERVER_KEY || '';
+        const isProduction = env.MIDTRANS_IS_PRODUCTION === 'true';
+
+        // Endpoint Midtrans Snap REST API Direct
+        const snapApiUrl = isProduction 
+            ? 'https://app.midtrans.com/snap/v1/transactions' 
+            : 'https://app.sandbox.midtrans.com/snap/v1/transactions';
+
+        // Encode Server Key ke Base64 (dengan titik dua di belakang sesuai format Auth Midtrans)
+        const authHeader = `Basic ${btoa(serverKey + ':')}`;
+
+        const parameter = {
+            transaction_details: { 
+                order_id: orderId, 
+                gross_amount: Math.round(amount) 
+            },
+            item_details: [{
+                id: `PKG-${package_id}`,
+                price: Math.round(amount),
+                quantity: 1,
+                name: `Paket ${pkg.name} (${cycle.toUpperCase()})`
+            }]
+        };
+
+        // Kirim request direct via Fetch Native Cloudflare Worker
+        const midtransRes = await fetch(snapApiUrl, {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': authHeader
+            },
+            body: JSON.stringify(parameter)
+        });
+
+        const snapData = await midtransRes.json();
+
+        if (!midtransRes.ok || !snapData.token) {
+            console.error("Midtrans API Error:", snapData);
+            return c.json({ 
+                success: false, 
+                message: "Gagal dari Midtrans: " + (snapData.error_messages ? snapData.error_messages.join(', ') : 'Gagal membuat token Snap') 
+            }, 500);
+        }
+
+        const startDateStr = new Date().toISOString().split('T')[0];
+
+        await pool.prepare(
+            `INSERT INTO subscriptions 
+            (order_id, shop_id, package_id, package_name, amount, start_date, end_date, status, payment_proof_url, billing_cycle) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        ).bind(orderId, shopId, parseInt(package_id), `${pkg.name} (${cycle.toUpperCase()})`, amount, startDateStr, startDateStr, orderId, cycle).run();
+
+        return c.json({
+            success: true,
+            order_id: orderId,
+            gross_amount: amount,
+            snap_token: snapData.token
+        });
+    } catch (error) {
+        console.error("Error generate Midtrans Snap:", error);
+        return c.json({ success: false, message: "Gagal membuat transaksi Midtrans: " + error.message }, 500);
     }
 });
 
-app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
+//di railway jalan, tapi di cloudeflare ga jalan, ganti pake yg bawah
+/*app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
     try {
         const pool = getDbPool(c);
         const snap = getSnapClient(c);
@@ -871,33 +878,27 @@ app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, asyn
         const fraudStatus = statusResponse.fraud_status;
 
         if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
-            const connection = await pool.getConnection();
             try {
-                await connection.beginTransaction();
-
-                const [subRows] = await connection.query(
+                const { results: subRows } = await pool.prepare(
                     `SELECT id, shop_id, package_id, billing_cycle 
                      FROM subscriptions 
-                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending' FOR UPDATE`,
-                    [orderId, orderId]
-                );
+                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+                ).bind(orderId, orderId).all();
 
-                if (subRows.length > 0) {
+                if (subRows && subRows.length > 0) {
                     const sub = subRows[0];
                     const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
 
-                    const [shopRows] = await connection.query(
-                        `SELECT subscription_until, max_transactions_monthly, package_id FROM shops WHERE id = ? FOR UPDATE`,
-                        [sub.shop_id]
-                    );
+                    const { results: shopRows } = await pool.prepare(
+                        `SELECT subscription_until, max_transactions_monthly, package_id FROM shops WHERE id = ?`
+                    ).bind(sub.shop_id).all();
 
                     const shop = shopRows[0];
                     const hariIni = new Date();
 
-                    const [pkgRows] = await connection.query(
-                        'SELECT id, max_transactions_monthly FROM packages WHERE id = ?', 
-                        [sub.package_id]
-                    );
+                    const { results: pkgRows } = await pool.prepare(
+                        'SELECT id, max_transactions_monthly FROM packages WHERE id = ?'
+                    ).bind(sub.package_id).all();
                     const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
                     const isNewSultan = (sub.package_id === 3);
 
@@ -926,34 +927,126 @@ app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, asyn
                     const startDateStr = hariIni.toISOString().split('T')[0];
                     const newUntilStr = newUntilDate.toISOString().split('T')[0];
 
-                    await connection.query(
+                    await pool.prepare(
                         `UPDATE shops 
                         SET subscription_status = 'active', 
                             subscription_until = ?, 
                             package_id = ?, 
                             billing_cycle = ?,
                             max_transactions_monthly = ? 
-                        WHERE id = ?`,
-                        [newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id]
-                    );
+                        WHERE id = ?`
+                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
 
-                    await connection.query(
+                    await pool.prepare(
                         `UPDATE subscriptions 
                         SET status = 'active', 
                             start_date = ?, 
                             end_date = ?,
                             max_transactions_monthly = ?
-                        WHERE id = ?`,
-                        [startDateStr, newUntilStr, newQuota, sub.id]
-                    );
+                        WHERE id = ?`
+                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
                 }
-
-                await connection.commit();
             } catch (err) {
-                await connection.rollback();
                 console.error("Error update DB via Polling status:", err);
-            } finally {
-                connection.release();
+            }
+        }
+
+        return c.json({
+            success: true,
+            order_id: orderId,
+            transaction_status: transactionStatus,
+            fraud_status: fraudStatus
+        });
+    } catch (error) {
+        console.error("Gagal cek status Midtrans:", error);
+        return c.json({ 
+            success: false, 
+            message: "Gagal memeriksa status pembayaran Midtrans." 
+        }, 500);
+    }
+});*/
+
+app.get('/api/shops/check-midtrans-status/:orderId', verifikasiAksesWarung, async (c) => {
+    try {
+        const pool = getDbPool(c);
+        const snap = getSnapClient(c);
+        const orderId = c.req.param('orderId');
+
+        const statusResponse = await snap.transaction.status(orderId);
+        const transactionStatus = statusResponse.transaction_status;
+        const fraudStatus = statusResponse.fraud_status;
+
+        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
+            try {
+                const { results: subRows } = await pool.prepare(
+                    `SELECT id, shop_id, package_id, billing_cycle 
+                     FROM subscriptions 
+                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+                ).bind(orderId, orderId).all();
+
+                if (subRows && subRows.length > 0) {
+                    const sub = subRows[0];
+                    const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+                    const { results: shopRows } = await pool.prepare(
+                        `SELECT subscription_until, max_transactions_monthly, package_id FROM shops WHERE id = ?`
+                    ).bind(sub.shop_id).all();
+
+                    const shop = shopRows[0];
+                    const hariIni = new Date();
+
+                    const { results: pkgRows } = await pool.prepare(
+                        'SELECT id, max_transactions_monthly FROM packages WHERE id = ?'
+                    ).bind(sub.package_id).all();
+                    const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+                    const isNewSultan = (sub.package_id === 3);
+
+                    let newUntilDate = new Date();
+                    let newQuota = 0;
+
+                    if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+                        const baseDate = new Date(shop.subscription_until);
+                        baseDate.setDate(baseDate.getDate() + daysToAdd);
+                        newUntilDate = baseDate;
+
+                        if (isNewSultan) {
+                            newQuota = 0;
+                        } else {
+                            const currentQuota = Math.max(0, parseInt(shop.max_transactions_monthly) || 0);
+                            newQuota = currentQuota + pkgMaxTx;
+                        }
+                    } else {
+                        const baseDate = new Date();
+                        baseDate.setDate(baseDate.getDate() + daysToAdd);
+                        newUntilDate = baseDate;
+
+                        newQuota = isNewSultan ? 0 : pkgMaxTx;
+                    }
+
+                    const startDateStr = hariIni.toISOString().split('T')[0];
+                    const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+                    await pool.prepare(
+                        `UPDATE shops 
+                        SET subscription_status = 'active', 
+                            subscription_until = ?, 
+                            package_id = ?, 
+                            billing_cycle = ?,
+                            max_transactions_monthly = ? 
+                        WHERE id = ?`
+                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
+
+                    await pool.prepare(
+                        `UPDATE subscriptions 
+                        SET status = 'active', 
+                            start_date = ?, 
+                            end_date = ?,
+                            max_transactions_monthly = ?
+                        WHERE id = ?`
+                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
+                }
+            } catch (err) {
+                console.error("Error update DB via Polling status:", err);
             }
         }
 
@@ -979,16 +1072,15 @@ app.get('/api/shops/subscription', verifikasiAksesWarung, async (c) => {
         const shopId = await getShopIdBySlug(pool, shopSlug);
         if (!shopId) return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
 
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT s.id, s.package_id, s.subscription_status, s.subscription_until, s.max_transactions_monthly,
                     p.name AS package_name, p.slug AS package_slug
              FROM shops s
              LEFT JOIN packages p ON s.package_id = p.id
-             WHERE s.id = ?`,
-            [shopId]
-        );
+             WHERE s.id = ?`
+        ).bind(shopId).all();
 
-        if (rows.length === 0) return c.json({ success: false, message: "Data toko tidak ditemukan." }, 404);
+        if (!rows || rows.length === 0) return c.json({ success: false, message: "Data toko tidak ditemukan." }, 404);
 
         const shop = rows[0];
         const sekarang = new Date();
@@ -1014,7 +1106,7 @@ app.get('/api/shops/subscription', verifikasiAksesWarung, async (c) => {
         }
 
         if (isExpiredByDate && shop.max_transactions_monthly > 0) {
-            await pool.query('UPDATE shops SET max_transactions_monthly = 0 WHERE id = ?', [shopId]);
+            await pool.prepare('UPDATE shops SET max_transactions_monthly = 0 WHERE id = ?').bind(shopId).run();
             remainingQuota = 0;
         }
 
@@ -1052,20 +1144,15 @@ app.post('/api/shops/subscribe', verifikasiAksesWarung, async (c) => {
         return c.json({ success: false, message: "Paket langganan dan bukti pembayaran wajib disertakan." }, 400);
     }
 
-    const connection = await pool.getConnection();
     try {
-        await connection.beginTransaction();
-
-        const shopId = await getShopIdBySlug(connection, shop);
+        const shopId = await getShopIdBySlug(pool, shop);
         if (!shopId) {
-            await connection.rollback();
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
         const selectedPackageId = parseInt(package_id);
-        const [pkgRows] = await connection.query('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?', [selectedPackageId]);
-        if (pkgRows.length === 0) {
-            await connection.rollback();
+        const { results: pkgRows } = await pool.prepare('SELECT name, price_monthly, price_yearly FROM packages WHERE id = ?').bind(selectedPackageId).all();
+        if (!pkgRows || pkgRows.length === 0) {
             return c.json({ success: false, message: "Paket tidak ditemukan." }, 404);
         }
 
@@ -1078,7 +1165,7 @@ app.post('/api/shops/subscribe', verifikasiAksesWarung, async (c) => {
         const arrayBuffer = await proofFile.arrayBuffer();
 
         await s3.send(new PutObjectCommand({
-            Bucket: c.env.R2_BUCKET_NAME,
+            Bucket: c.env.R2_BUCKET_STR,
             Key: uniqueFilename,
             Body: Buffer.from(arrayBuffer),
             ContentType: proofFile.type || 'image/jpeg',
@@ -1087,40 +1174,33 @@ app.post('/api/shops/subscribe', verifikasiAksesWarung, async (c) => {
         const urlBuktiBayar = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
         const startDateStr = new Date().toISOString().split('T')[0];
 
-        await connection.query(
-            `UPDATE shops SET subscription_status = 'pending', package_id = ?, billing_cycle = ? WHERE id = ?`,
-            [selectedPackageId, cycle, shopId]
-        );
+        await pool.prepare(
+            `UPDATE shops SET subscription_status = 'pending', package_id = ?, billing_cycle = ? WHERE id = ?`
+        ).bind(selectedPackageId, cycle, shopId).run();
 
-        await connection.query(
+        await pool.prepare(
             `INSERT INTO subscriptions 
             (shop_id, package_id, package_name, amount, start_date, end_date, status, payment_proof_url, billing_cycle) 
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-            [shopId, selectedPackageId, `${packageData.name} (${cycle.toUpperCase()})`, nominalBayar, startDateStr, startDateStr, urlBuktiBayar, cycle]
-        );
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+        ).bind(shopId, selectedPackageId, `${packageData.name} (${cycle.toUpperCase()})`, nominalBayar, startDateStr, startDateStr, urlBuktiBayar, cycle).run();
 
-        await connection.commit();
         return c.json({ success: true, message: "Bukti pembayaran berhasil dikirim!" });
     } catch (error) {
-        await connection.rollback();
         console.error("Error submit perpanjangan paket:", error);
         return c.json({ success: false, message: "Gagal memproses bukti pembayaran: " + error.message }, 500);
-    } finally {
-        connection.release();
     }
 });
 
 // ---------------- AUTH, DASHBOARD, REGISTER ----------------
 app.post('/api/auth/login', async (c) => {
     try {
-        const db = getDbPool(c); // Mengambil binding D1
+        const db = getDbPool(c); 
         const { username, password } = await c.req.json();
         
         if (!username || !password) {
             return c.json({ success: false, message: 'Username dan password wajib diisi!' }, 400);
         }
 
-        // Jalankan Query Menggunakan Sintaks D1 SQLite
         const { results } = await db
             .prepare('SELECT * FROM shops WHERE username = ? AND password = ?')
             .bind(username, password)
@@ -1147,7 +1227,7 @@ app.post('/api/auth/login', async (c) => {
 
 app.get('/api/orders/dashboard-pos', verifikasiAksesWarung, async (c) => {
     try {
-        const db = getDbPool(c);
+        const pool = getDbPool(c);
         const shopSlug = c.req.query('shop') || c.req.header('x-shop-slug');
         const startDate = c.req.query('startDate');
         const endDate = c.req.query('endDate');
@@ -1171,12 +1251,12 @@ app.get('/api/orders/dashboard-pos', verifikasiAksesWarung, async (c) => {
             queryText += ` AND DATE(o.created_at) BETWEEN ? AND ?`;
             params.push(startDate, endDate);
         } else {
-            queryText += ` AND DATE(o.created_at) = CURDATE()`;
+            queryText += ` AND DATE(o.created_at) = DATE('now')`;
         }
 
         queryText += ` ORDER BY o.created_at DESC`;
 
-        const [rows] = await pool.query(queryText, params);
+        const { results: rows } = await pool.prepare(queryText).bind(...params).all();
         return c.json({ success: true, orders: rows });
     } catch (error) {
         console.error("Error dashboard POS:", error);
@@ -1186,76 +1266,61 @@ app.get('/api/orders/dashboard-pos', verifikasiAksesWarung, async (c) => {
 
 app.post('/api/orders/cancel/:orderId', verifikasiAksesWarung, cekMasaAktifSub, async (c) => {
     const pool = getDbPool(c);
-    const connection = await pool.getConnection();
     try {
         const orderId = c.req.param('orderId');
         const body = await c.req.json();
         const shopSlug = body.shop || c.req.query('shop') || c.req.header('x-shop-slug');
         const cancelReason = body.cancel_reason || body.reason || 'Salah input / Batal transaksi';
 
-        const shopId = await getShopIdBySlug(connection, shopSlug);
+        const shopId = await getShopIdBySlug(pool, shopSlug);
         if (!shopId) {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        await connection.beginTransaction();
+        const { results: orders } = await pool.prepare(
+            'SELECT id, status, invoice_number FROM orders WHERE id = ? AND shop_id = ?'
+        ).bind(orderId, shopId).all();
 
-        const [orders] = await connection.query(
-            'SELECT id, status, invoice_number FROM orders WHERE id = ? AND shop_id = ? FOR UPDATE',
-            [orderId, shopId]
-        );
-
-        if (orders.length === 0) {
-            await connection.rollback();
+        if (!orders || orders.length === 0) {
             return c.json({ success: false, message: "Transaksi tidak ditemukan." }, 404);
         }
 
         if (orders[0].status === 'cancelled') {
-            await connection.rollback();
             return c.json({ success: false, message: "Transaksi ini sudah dibatalkan sebelumnya." }, 400);
         }
 
-        const [items] = await connection.query(
-            'SELECT product_id, qty FROM order_details WHERE order_id = ?',
-            [orderId]
-        );
+        const { results: items } = await pool.prepare(
+            'SELECT product_id, qty FROM order_details WHERE order_id = ?'
+        ).bind(orderId).all();
 
         for (const item of items) {
             if (item.product_id) {
-                const [pRows] = await connection.query(
-                    'SELECT stock FROM products WHERE id = ? AND shop_id = ? FOR UPDATE',
-                    [item.product_id, shopId]
-                );
+                const { results: pRows } = await pool.prepare(
+                    'SELECT stock FROM products WHERE id = ? AND shop_id = ?'
+                ).bind(item.product_id, shopId).all();
                 const oldStock = pRows[0] ? pRows[0].stock : 0;
                 const newStock = oldStock + item.qty;
 
-                await connection.query(
-                    'UPDATE products SET stock = ? WHERE id = ?',
-                    [newStock, item.product_id]
-                );
+                await pool.prepare(
+                    'UPDATE products SET stock = ? WHERE id = ?'
+                ).bind(newStock, item.product_id).run();
 
-                await connection.query(
+                await pool.prepare(
                     `INSERT INTO stock_mutations (shop_id, product_id, type, qty, stock_before, stock_after, reference_number, notes) 
-                    VALUES (?, ?, 'IN', ?, ?, ?, ?, ?)`,
-                    [shopId, item.product_id, item.qty, oldStock, newStock, orders[0].invoice_number || `CANCEL-${orderId}`, `Batal Tx: ${cancelReason}`]
-                );
+                    VALUES (?, ?, 'IN', ?, ?, ?, ?, ?)`
+                ).bind(shopId, item.product_id, item.qty, oldStock, newStock, orders[0].invoice_number || `CANCEL-${orderId}`, `Batal Tx: ${cancelReason}`).run();
             }
         }
 
-        await connection.query(
-            "UPDATE orders SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = ? WHERE id = ?",
-            [cancelReason, orderId]
-        );
+        await pool.prepare(
+            "UPDATE orders SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, cancel_reason = ? WHERE id = ?"
+        ).bind(cancelReason, orderId).run();
 
-        await connection.commit();
         return c.json({ success: true, message: "Transaksi berhasil dibatalkan dan stok produk telah dikembalikan." });
 
     } catch (error) {
-        await connection.rollback();
         console.error("Error batalkan transaksi:", error);
         return c.json({ success: false, message: "Gagal membatalkan transaksi: " + error.message }, 500);
-    } finally {
-        connection.release();
     }
 });
 
@@ -1263,15 +1328,14 @@ app.get('/api/shops/settings', verifikasiAksesWarung, async (c) => {
     try {
         const pool = getDbPool(c);
         const shopSlug = c.req.query('shop') || c.req.header('x-shop-slug');
-        const [rows] = await pool.query(
+        const { results: rows } = await pool.prepare(
             `SELECT id, shop_name, owner_name, slug, is_open, show_cash_payment, has_tax, 
                     tax_percentage, discount_percentage, bank_rekening_info, qris_image_url,
                     is_stock_calculated, package_id 
-             FROM shops WHERE slug = ?`,
-            [shopSlug]
-        );
+             FROM shops WHERE slug = ?`
+        ).bind(shopSlug).all();
 
-        if (rows.length === 0) {
+        if (!rows || rows.length === 0) {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
@@ -1306,18 +1370,20 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
 
         const file = body.qris_image;
         if (file && typeof file === 'object' && file.name) {
-            const fileExtension = file.name.split('.').pop();
+            const fileExtension = file.name.split('.').pop().toLowerCase();
             const uniqueFilename = `qris-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${fileExtension}`;
             const arrayBuffer = await file.arrayBuffer();
+            const binaryData = new Uint8Array(arrayBuffer);
 
-            await s3.send(new PutObjectCommand({
-                Bucket: c.env.R2_BUCKET_NAME,
-                Key: uniqueFilename,
-                Body: Buffer.from(arrayBuffer),
-                ContentType: file.type || 'image/jpeg',
-            }));
+            let mimeType = file.type || (fileExtension === 'png' ? 'image/png' : 'image/jpeg');
 
-            const urlFoto = `${c.env.R2_PUBLIC_URL}/${uniqueFilename}`;
+            // Simpan ke R2 via binding Worker
+            await c.env.R2_BUCKET.put(uniqueFilename, binaryData, {
+                httpMetadata: { contentType: mimeType }
+            });
+
+            // Simpan rute API internal ke Database
+            const urlFoto = `/api/images/${uniqueFilename}`;
             qrisUrlQuery = ", qris_image_url = ?";
             params.push(urlFoto);
         }
@@ -1330,12 +1396,36 @@ app.put('/api/shops/settings', verifikasiAksesWarung, cekMasaAktifSub, async (c)
             WHERE id = ?
         `;
 
-        await pool.query(queryText, params);
+        await pool.prepare(queryText).bind(...params).run();
 
         return c.json({ success: true, message: "Pengaturan toko berhasil diperbarui!" });
     } catch (error) {
         console.error("Error update setting toko:", error);
         return c.json({ success: false, message: "Gagal menyimpan pengaturan toko: " + error.message }, 500);
+    }
+});
+// ---------------- IMAGE PROXY SERVER (UNTUK SEMUA GAMBAR R2) ----------------
+app.get('/api/images/:key', async (c) => {
+    try {
+        const key = c.req.param('key');
+        if (!key) return c.text('Key gambar tidak ditemukan', 400);
+
+        // Ambil objek gambar langsung dari R2 via internal binding
+        const object = await c.env.R2_BUCKET.get(key);
+        if (!object) {
+            return c.text('Gambar tidak ditemukan di R2', 404);
+        }
+
+        const headers = new Headers();
+        object.writeHttpMetadata(headers);
+        headers.set('etag', object.httpEtag);
+        headers.set('Access-Control-Allow-Origin', '*'); // Bebas CORS di semua browser
+        headers.set('Cache-Control', 'public, max-age=31536000'); // Cache gambar 1 tahun
+
+        return new Response(object.body, { headers });
+    } catch (error) {
+        console.error("Error serving image via Worker:", error);
+        return c.text("Gagal memuat gambar: " + error.message, 500);
     }
 });
 
@@ -1346,21 +1436,19 @@ app.get('/api/orders/details/:orderId', verifikasiAksesWarung, async (c) => {
         const shopSlug = c.req.query('shop') || c.req.header('x-shop-slug');
         const shopId = await getShopIdBySlug(pool, shopSlug);
 
-        const [orderRows] = await pool.query(
+        const { results: orderRows } = await pool.prepare(
             `SELECT id, invoice_number, customer_name, payment_method, subtotal, discount, tax, total, payment, \`change\`, created_at 
              FROM orders 
-             WHERE id = ? AND shop_id = ?`,
-            [orderId, shopId]
-        );
+             WHERE id = ? AND shop_id = ?`
+        ).bind(orderId, shopId).all();
 
-        if (orderRows.length === 0) {
+        if (!orderRows || orderRows.length === 0) {
             return c.json({ success: false, message: "Data pesanan tidak ditemukan." }, 404);
         }
 
-        const [itemRows] = await pool.query(
-            `SELECT product_name, price, qty, subtotal FROM order_details WHERE order_id = ?`,
-            [orderId]
-        );
+        const { results: itemRows } = await pool.prepare(
+            `SELECT product_name, price, qty, subtotal FROM order_details WHERE order_id = ?`
+        ).bind(orderId).all();
 
         return c.json({ 
             success: true, 
@@ -1382,18 +1470,12 @@ app.post('/api/register', async (c) => {
         return c.json({ success: false, message: "Semua field wajib diisi." }, 400);
     }
 
-    const connection = await pool.getConnection();
-
     try {
-        await connection.beginTransaction();
+        const { results: existingShop } = await pool.prepare(
+            "SELECT id FROM shops WHERE slug = ? OR username = ?"
+        ).bind(slug, username).all();
 
-        const [existingShop] = await connection.query(
-            "SELECT id FROM shops WHERE slug = ? OR username = ?", 
-            [slug, username]
-        );
-
-        if (existingShop.length > 0) {
-            await connection.rollback();
+        if (existingShop && existingShop.length > 0) {
             return c.json({ 
                 success: false, 
                 message: "Nama warung (slug) atau Nomor HP (username) sudah terdaftar!" 
@@ -1401,11 +1483,10 @@ app.post('/api/register', async (c) => {
         }
 
         const selectedPackageId = package_id ? parseInt(package_id) : 1;
-        const [pkgRows] = await connection.query(
-            'SELECT name, price_monthly, price_yearly, max_transactions_monthly FROM packages WHERE id = ?', 
-            [selectedPackageId]
-        );
-        const packageData = pkgRows.length > 0 ? pkgRows[0] : { name: 'UMKM', max_transactions_monthly: 0 };
+        const { results: pkgRows } = await pool.prepare(
+            'SELECT name, price_monthly, price_yearly, max_transactions_monthly FROM packages WHERE id = ?'
+        ).bind(selectedPackageId).all();
+        const packageData = pkgRows && pkgRows.length > 0 ? pkgRows[0] : { name: 'UMKM', max_transactions_monthly: 0 };
         const cycle = (billing_cycle === 'yearly') ? 'yearly' : 'monthly';
 
         const startDate = new Date();
@@ -1417,30 +1498,25 @@ app.post('/api/register', async (c) => {
         const selectedWilayah = wilayah || 'DKI Jakarta';
         const termsStatus = is_terms_agreed !== undefined ? Number(is_terms_agreed) : 1;
 
-        const [shopResult] = await connection.query(
+        const shopResult = await pool.prepare(
             `INSERT INTO shops 
             (shop_name, owner_name, slug, username, password, is_open, wilayah, subscription_status, subscription_until, package_id, billing_cycle, max_transactions_monthly, is_terms_agreed) 
-            VALUES (?, ?, ?, ?, ?, 1, ?, 'trial', ?, ?, ?, ?, ?)`,
-            [shop_name, owner_name, slug, username, password, selectedWilayah, endDateStr, selectedPackageId, cycle, 50, termsStatus]
-        );
+            VALUES (?, ?, ?, ?, ?, 1, ?, 'trial', ?, ?, ?, ?, ?)`
+        ).bind(shop_name, owner_name, slug, username, password, selectedWilayah, endDateStr, selectedPackageId, cycle, 50, termsStatus).run();
 
-        const newShopId = shopResult.insertId;
+        const newShopId = shopResult.meta.last_row_id;
 
-        await connection.query(
+        await pool.prepare(
             `INSERT INTO subscriptions 
             (shop_id, package_id, package_name, amount, start_date, end_date, status, billing_cycle, max_transactions_monthly) 
-            VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?, ?)`,
-            [newShopId, selectedPackageId, `Trial 14 Hari (${packageData.name} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle, 50]
-        );
+            VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?, ?)`
+        ).bind(newShopId, selectedPackageId, `Trial 14 Hari (${packageData.name} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle, 50).run();
 
         const smsMessage = `Kami dari BEDApos, ${shop_name} (TRIAL 14hr), Link Aplikasi: pos.bedadigital.app/login.html `;
    
-        await connection.query(
-            `INSERT INTO beda.sms_queue (phone, message, status, retry_count) VALUES (?, ?, 'PENDING', 0)`,
-            [username, smsMessage]
-        );
-
-        await connection.commit();
+        await pool.prepare(
+            `INSERT INTO sms_queue (phone, message, status, retry_count) VALUES (?, ?, 'PENDING', 0)`
+        ).bind(username, smsMessage).run();
 
         return c.json({
             success: true,
@@ -1451,11 +1527,8 @@ app.post('/api/register', async (c) => {
         }, 201);
 
     } catch (error) {
-        await connection.rollback();
         console.error("Error pendaftaran warung:", error);
         return c.json({ success: false, message: "Gagal menyimpan data pendaftaran: " + error.message }, 500);
-    } finally {
-        connection.release();
     }
 });
 
@@ -1476,9 +1549,9 @@ app.post('/api/auth/reset-password', async (c) => {
             params.push(shop);
         }
 
-        const [rows] = await pool.query(query, params);
+        const { results: rows } = await pool.prepare(query).bind(...params).all();
 
-        if (rows.length === 0) {
+        if (!rows || rows.length === 0) {
             return c.json({ 
                 success: false, 
                 message: 'Data warung dengan nomor handphone tersebut tidak ditemukan!' 
@@ -1486,7 +1559,7 @@ app.post('/api/auth/reset-password', async (c) => {
         }
 
         const shopId = rows[0].id;
-        await pool.query('UPDATE shops SET password = ? WHERE id = ?', [new_password, shopId]);
+        await pool.prepare('UPDATE shops SET password = ? WHERE id = ?').bind(new_password, shopId).run();
 
         return c.json({
             success: true,
@@ -1512,11 +1585,10 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: 'Warung tidak ditemukan.' }, 404);
         }
 
-        const [invSummary] = await pool.query(
+        const { results: invSummary } = await pool.prepare(
             `SELECT SUM(stock * cost_price) AS total_inventory_value, SUM(stock) AS total_items 
-             FROM products WHERE shop_id = ? AND is_active = 1`,
-            [shopId]
-        );
+             FROM products WHERE shop_id = ? AND is_active = 1`
+        ).bind(shopId).all();
 
         let queryText = `
             SELECT sm.id, sm.type, sm.qty, sm.buy_price, sm.unit_cost, sm.stock_before, sm.stock_after, sm.reference_number, sm.notes, sm.created_at,
@@ -1534,7 +1606,7 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
 
         queryText += ` ORDER BY sm.created_at DESC`;
 
-        const [rows] = await pool.query(queryText, params);
+        const { results: rows } = await pool.prepare(queryText).bind(...params).all();
         return c.json({ 
             success: true, 
             inventory_summary: invSummary[0],
@@ -1546,7 +1618,8 @@ app.get('/api/stock-mutations', verifikasiAksesWarung, async (c) => {
     }
 });
 
-app.post('/api/payments/midtrans-notification', async (c) => {
+//di incative karena ganti server ke cloudeflare yang metode nya berbeda
+/*app.post('/api/payments/midtrans-notification', async (c) => {
     try {
         const pool = getDbPool(c);
         const snap = getSnapClient(c);
@@ -1581,30 +1654,24 @@ app.post('/api/payments/midtrans-notification', async (c) => {
         const fraudStatus = statusResponse.fraud_status;
 
         if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
-            const connection = await pool.getConnection();
             try {
-                await connection.beginTransaction();
-
-                const [subRows] = await connection.query(
+                const { results: subRows } = await pool.prepare(
                     `SELECT id, shop_id, package_id, billing_cycle 
                      FROM subscriptions 
-                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending' FOR UPDATE`,
-                    [orderId, orderId]
-                );
+                     WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+                ).bind(orderId, orderId).all();
 
-                if (subRows.length > 0) {
+                if (subRows && subRows.length > 0) {
                     const sub = subRows[0];
                     const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
 
-                    const [shopRows] = await connection.query(
-                        `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ? FOR UPDATE`,
-                        [sub.shop_id]
-                    );
+                    const { results: shopRows } = await pool.prepare(
+                        `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ?`
+                    ).bind(sub.shop_id).all();
 
-                    const [pkgRows] = await connection.query(
-                        `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`,
-                        [sub.package_id]
-                    );
+                    const { results: pkgRows } = await pool.prepare(
+                        `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`
+                    ).bind(sub.package_id).all();
 
                     const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
                     const isNewSultan = (sub.package_id === 3);
@@ -1636,34 +1703,27 @@ app.post('/api/payments/midtrans-notification', async (c) => {
                     const startDateStr = hariIni.toISOString().split('T')[0];
                     const newUntilStr = newUntilDate.toISOString().split('T')[0];
 
-                    await connection.query(
+                    await pool.prepare(
                         `UPDATE shops 
                         SET subscription_status = 'active', 
                             subscription_until = ?, 
                             package_id = ?, 
                             billing_cycle = ?,
                             max_transactions_monthly = ? 
-                        WHERE id = ?`,
-                        [newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id]
-                    );
+                        WHERE id = ?`
+                    ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
 
-                    await connection.query(
+                    await pool.prepare(
                         `UPDATE subscriptions 
                         SET status = 'active', 
                             start_date = ?, 
                             end_date = ?,
                             max_transactions_monthly = ?
-                        WHERE id = ?`,
-                        [startDateStr, newUntilStr, newQuota, sub.id]
-                    );
+                        WHERE id = ?`
+                    ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
                 }
-
-                await connection.commit();
             } catch (err) {
-                await connection.rollback();
                 console.error("Gagal update DB saat notification:", err.message);
-            } finally {
-                connection.release();
             }
         }
 
@@ -1671,6 +1731,121 @@ app.post('/api/payments/midtrans-notification', async (c) => {
     } catch (error) {
         console.error("Error Webhook Midtrans:", error);
         return c.json({ success: false, message: error.message });
+    }
+});*/
+
+// ---------------- MIDTRANS NOTIFICATION WEBHOOK ----------------
+app.all('/api/payments/midtrans-notification', async (c) => {
+    // 1. Cek langsung HTTP Method. Jika GET (buka via browser), langsung kembalikan respon tanpa parsing JSON
+    if (c.req.method === 'GET') {
+        return c.json({ 
+            success: true, 
+            message: "Endpoint Webhook Midtrans Aktif dan Siap Menerima Request POST." 
+        }, 200);
+    }
+
+    try {
+        const pool = getDbPool(c);
+        let notification = {};
+        
+        try {
+            notification = await c.req.json();
+        } catch (e) {
+            return c.json({ success: true, message: "No payload received" }, 200);
+        }
+        
+        if (!notification || Object.keys(notification).length === 0) {
+            return c.json({ success: true, message: "Notification test received." }, 200);
+        }
+
+        const orderId = notification.order_id || '';
+        const transactionStatus = notification.transaction_status;
+        const fraudStatus = notification.fraud_status;
+
+        // Forwarding jika transaksi berasal dari sistem lain (Pesan Antar)
+        if (orderId.startsWith('BEDAORDER-') || orderId.startsWith('ORDER-')) {
+            try {
+                await fetch('https://nodejs-pesan-antar-production.up.railway.app/api/payments/midtrans-notification', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(notification)
+                });
+            } catch (fwdError) {
+                console.error("Forwarding failed:", fwdError);
+            }
+            return c.json({ success: true, message: "Forwarded" }, 200);
+        }
+
+        // Jika status pembayaran sukses (settlement atau capture accept)
+        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
+            const { results: subRows } = await pool.prepare(
+                `SELECT id, shop_id, package_id, billing_cycle 
+                 FROM subscriptions 
+                 WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+            ).bind(orderId, orderId).all();
+
+            if (subRows && subRows.length > 0) {
+                const sub = subRows[0];
+                const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+                const { results: shopRows } = await pool.prepare(
+                    `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ?`
+                ).bind(sub.shop_id).all();
+
+                const { results: pkgRows } = await pool.prepare(
+                    `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`
+                ).bind(sub.package_id).all();
+
+                const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+                const isNewSultan = (sub.package_id === 3);
+                const shop = shopRows[0];
+                const hariIni = new Date();
+
+                let newUntilDate = new Date();
+                let newQuota = 0;
+
+                if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+                    const baseDate = new Date(shop.subscription_until);
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : (Math.max(0, parseInt(shop.max_transactions_monthly) || 0) + pkgMaxTx);
+                } else {
+                    const baseDate = new Date();
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : pkgMaxTx;
+                }
+
+                const startDateStr = hariIni.toISOString().split('T')[0];
+                const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+                await pool.prepare(
+                    `UPDATE shops 
+                    SET subscription_status = 'active', 
+                        subscription_until = ?, 
+                        package_id = ?, 
+                        billing_cycle = ?,
+                        max_transactions_monthly = ? 
+                    WHERE id = ?`
+                ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
+
+                await pool.prepare(
+                    `UPDATE subscriptions 
+                    SET status = 'active', 
+                        start_date = ?, 
+                        end_date = ?,
+                        max_transactions_monthly = ?
+                    WHERE id = ?`
+                ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
+            }
+        }
+
+        return c.json({ success: true, message: "Notification processed." }, 200);
+    } catch (error) {
+        console.error("Error Webhook Midtrans:", error);
+        return c.json({ success: false, message: error.message }, 200);
     }
 });
 
@@ -1687,13 +1862,13 @@ app.get('/api/orders/export-excel', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        const [shopRows] = await pool.query('SELECT wilayah FROM shops WHERE id = ?', [shopId]);
+        const { results: shopRows } = await pool.prepare('SELECT wilayah FROM shops WHERE id = ?').bind(shopId).all();
         const shopWilayah = shopRows[0]?.wilayah || 'DKI Jakarta';
         const targetTimeZone = getTimeZoneByWilayah(shopWilayah);
 
         let queryText = `
             SELECT o.invoice_number, o.customer_name, o.payment_method, o.subtotal, o.discount, o.tax, o.total, o.payment, o.\`change\`, o.status, o.cancel_reason, o.created_at,
-                   GROUP_CONCAT(CONCAT(od.product_name, ' (x', od.qty, ')') SEPARATOR ', ') AS items_detail
+                   GROUP_CONCAT(CONCAT(od.product_name, ' (x', od.qty, ')') , ', ') AS items_detail
             FROM orders o
             LEFT JOIN order_details od ON o.id = od.order_id
             WHERE o.shop_id = ?
@@ -1704,12 +1879,12 @@ app.get('/api/orders/export-excel', verifikasiAksesWarung, async (c) => {
             queryText += ` AND DATE(o.created_at) BETWEEN ? AND ?`;
             params.push(startDate, endDate);
         } else {
-            queryText += ` AND DATE(o.created_at) = CURDATE()`;
+            queryText += ` AND DATE(o.created_at) = DATE('now')`;
         }
 
         queryText += ` GROUP BY o.id ORDER BY o.created_at DESC`;
 
-        const [rows] = await pool.query(queryText, params);
+        const { results: rows } = await pool.prepare(queryText).bind(...params).all();
 
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Riwayat Transaksi');
@@ -1789,7 +1964,7 @@ app.get('/api/stock-mutations/export-excel', verifikasiAksesWarung, async (c) =>
             return c.json({ success: false, message: 'Warung tidak ditemukan.' }, 404);
         }
 
-        const [shopRows] = await pool.query('SELECT wilayah FROM shops WHERE id = ?', [shopId]);
+        const { results: shopRows } = await pool.prepare('SELECT wilayah FROM shops WHERE id = ?').bind(shopId).all();
         const shopWilayah = shopRows[0]?.wilayah || 'DKI Jakarta';
         const targetTimeZone = getTimeZoneByWilayah(shopWilayah);
 
@@ -1809,7 +1984,7 @@ app.get('/api/stock-mutations/export-excel', verifikasiAksesWarung, async (c) =>
 
         queryText += ` ORDER BY sm.created_at DESC`;
 
-        const [rows] = await pool.query(queryText, params);
+        const { results: rows } = await pool.prepare(queryText).bind(...params).all();
 
         const workbook = new ExcelJS.Workbook();
         const worksheet = workbook.addWorksheet('Laporan Mutasi Stok');
@@ -1885,12 +2060,11 @@ app.get('/api/reports/profit-loss', verifikasiAksesWarung, async (c) => {
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        const [shopRows] = await pool.query(
-            `SELECT package_id FROM shops WHERE id = ?`,
-            [shopId]
-        );
+        const { results: shopRows } = await pool.prepare(
+            `SELECT package_id FROM shops WHERE id = ?`
+        ).bind(shopId).all();
 
-        if (shopRows.length === 0) {
+        if (!shopRows || shopRows.length === 0) {
             return c.json({ success: false, message: "Data toko tidak ditemukan." }, 404);
         }
 
@@ -1902,7 +2076,7 @@ app.get('/api/reports/profit-loss', verifikasiAksesWarung, async (c) => {
             }, 403);
         }
 
-        let dateFilter = "AND DATE(o.created_at) = CURDATE()";
+        let dateFilter = "AND DATE(o.created_at) = DATE('now')";
         let params = [shopId];
 
         if (startDate && endDate) {
@@ -1925,7 +2099,7 @@ app.get('/api/reports/profit-loss', verifikasiAksesWarung, async (c) => {
             ORDER BY total_gross_sales DESC
         `;
 
-        const [categoryRows] = await pool.query(categoriesQuery, params);
+        const { results: categoryRows } = await pool.prepare(categoriesQuery).bind(...params).all();
 
         const summaryQuery = `
             SELECT 
@@ -1937,7 +2111,7 @@ app.get('/api/reports/profit-loss', verifikasiAksesWarung, async (c) => {
             WHERE o.shop_id = ? AND o.status = 'completed' ${dateFilter}
         `;
 
-        const [summaryRows] = await pool.query(summaryQuery, params);
+        const { results: summaryRows } = await pool.prepare(summaryQuery).bind(...params).all();
         const summary = summaryRows[0];
 
         let grandTotalHpp = 0;
@@ -1998,12 +2172,12 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
             return c.json({ success: false, message: "Warung tidak ditemukan." }, 404);
         }
 
-        const [shopRows] = await pool.query(`SELECT package_id FROM shops WHERE id = ?`, [shopId]);
-        if (shopRows.length === 0 || (Number(shopRows[0].package_id) !== 2 && Number(shopRows[0].package_id) !== 3)) {
+        const { results: shopRows } = await pool.prepare(`SELECT package_id FROM shops WHERE id = ?`).bind(shopId).all();
+        if (!shopRows || shopRows.length === 0 || (Number(shopRows[0].package_id) !== 2 && Number(shopRows[0].package_id) !== 3)) {
             return c.json({ success: false, message: "Akses ditolak. Fitur khusus Paket Juragan dan Sultan." }, 403);
         }
 
-        let dateFilter = "AND DATE(o.created_at) = CURDATE()";
+        let dateFilter = "AND DATE(o.created_at) = DATE('now')";
         let params = [shopId];
 
         if (startDate && endDate) {
@@ -2025,7 +2199,7 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
             GROUP BY c.name
             ORDER BY total_gross_sales DESC
         `;
-        const [categoryRows] = await pool.query(categoriesQuery, params);
+        const { results: categoryRows } = await pool.prepare(categoriesQuery).bind(...params).all();
 
         const summaryQuery = `
             SELECT 
@@ -2036,7 +2210,7 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
             FROM orders o
             WHERE o.shop_id = ? AND o.status = 'completed' ${dateFilter}
         `;
-        const [summaryRows] = await pool.query(summaryQuery, params);
+        const { results: summaryRows } = await pool.prepare(summaryQuery).bind(...params).all();
         const summary = summaryRows[0];
 
         let grandTotalHpp = 0;
@@ -2154,7 +2328,7 @@ app.post('/api/tanya-ai', async (c) => {
         3.	Setting yang diperlukan
         -	Ada Kena Pajak?, ceklis kalau memang ada pajak, ketik nilai persen pajaknya, kasih 0 jika barang/jasa mu sudah termasuk pajak. Kalau usaha mu belum ada pajak maka biarkan tidak ter ceklis.
         -	Hitung Stok Otomatis?, ini berlaku untuk paket Juragan dan Sultan, ceklis,jika transaksi barang mu ada pengecekan stok, sehingga stok yang sudah 0 tidak bisa di transaksi. Ceklis nya hilangkan jika memang belum siap untuk menerapkan hitung stok otomatis. Untuk paket UMKM hitung stok otomatis tidak ada, jadi murni transaksi tanpa melihat stok.
-        -	Diskon standard toko (%), ini diisi apabila anda memberikan diskon di setiap transaksi yang terjadi, misalkan pada waktu-waktu tertentu, maka apabila ini diisi, setiap transaksi yang terjadi akan terpotong diskon ini. Jika sudah tidak diperlukan lagi diskon ini, maka isi dengan angka 0.
+        -	Diskon standard toko (%), ini diisi apabila anda memberikan diskon di setiap transaksi yang terjadi, misalkan pada waktu-waktu tertentu, maka apabila ini diisi, setiap transaksi yang terjadi akan terpotong discount ini. Jika sudah tidak diperlukan lagi diskon ini, maka isi dengan angka 0.
         -	Rincian Akun bank, Isi no. rekening usaha anda disini, supaya nanti di kasir bisa langsung dilihat no. rekening nya apabila ada yang menggunakan metode pembayaran transfer.
         -	Ganti foto QRIS, jika memiliki QIRS, upload gambar QRIS mu disitu, sehingga di kasir bisa langsung tampil dan bisa langsung di scan.
         -	Klik simpan kalau sudah selesai.
