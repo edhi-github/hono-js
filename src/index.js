@@ -5,7 +5,7 @@ import midtransClient from 'midtrans-client';
 import crypto from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+const { GoogleGenAI } = require('@google/genai');
 
 const app = new Hono();
 
@@ -2029,17 +2029,17 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
 });
 
 // ---------------- GEMINI AI ASSISTANT ----------------
-app.post('/api/tanya-ai', async (c) => {
+app.post('/api/tanya-ai', async (req, res) => {
     try {
-        const { message, history } = await c.req.json();
+        const { message, history } = req.body;
 
         if (!message) {
-            return c.json({ success: false, message: "Pesan tidak boleh kosong." }, 400);
+            return res.status(400).json({ success: false, message: "Pesan tidak boleh kosong." });
         }
 
-        const apiKey = c.env.GEMINI_API_KEY;
+        const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {
-            return c.json({ success: false, message: "API Key Gemini belum diatur di Variables Cloudflare/Environment." }, 500);
+            return res.status(500).json({ success: false, message: "API Key Gemini belum diatur di Variables Railway." });
         }
 
         const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -2048,9 +2048,94 @@ app.post('/api/tanya-ai', async (c) => {
         Kamu adalah Asisten BEDA. Tugasmu membantu pemilik warung/usaha terkait settingan warung, QRIS, kelola stok, dan proses transaksi. Jawab dengan bahasa ramah, sopan, dan solutif. Jika ada kendala teknis darurat, sarankan hubungi WhatsApp Admin BEDApos di 089525147422 atau email support@bedadigital.app .
         ATURAN GAYA MENJAWAB (SANGAT PENTING):
         1. Jawab secara RINGKAS, PADAT, dan LANGSUNG KE INTI (Maksimal 2 - 3 kalimat).
-        2. DILARANG menggunakan basa-basi pembuka yang panjang.
+        2. DILARANG menggunakan basa-basi pembuka yang panjang (seperti "Halo! Senang sekali bisa membantu Anda...").
         3. Jangan gunakan poin-poin panjang kecuali diminta secara spesifik oleh pengguna.
         4. Gunakan bahasa Indonesia sehari-hari yang ramah, sopan, dan mudah dipahami pemilik warung.
+        Informasi Penting :
+        - untuk pendafaran klik tombol Daftar Sekarang di web bedapos.bedadigital.app
+        - Ada live demo nya,  klik tombol Live Demo POS (login nya no.HP: 012345678 password: demo123)
+        - Pendaftaran gratis trial 14 hari via bedapos.bedadigital.app.
+        - Uang hasil penjualan 100% masuk ke rekening/QRIS pribadi pemilik warung (0% komisi).
+        - Untuk tata cara penggunakan bisa dilihat di panduan
+        Informasi tambahan :
+        - BEDApos cukup diakses via browser HP/Laptop tanpa perlu install aplikasi.
+        - Uang pembayaran dari pelanggan akan langsung masuk ke rekening bank atau QRIS pribadi milik Anda sendiri tanpa melalui pihak ketiga.
+        - kalau butuh panduan tata cara, klik tombol PANDUAN di web ini
+        
+        Apa yang harus dilakukan setelah daftar.
+        1.	Masuk ke Alamat web https://pos.bedadigital.app/login.html , lakukan login
+        2.	Masuk ke Pengaturan, kalau dari HP,klik tombol titik 3, klik pengaturan
+        3.	Setting yang diperlukan
+        -	Ada Kena Pajak?, ceklis kalau memang ada pajak, ketik nilai persen pajaknya, kasih 0 jika barang/jasa mu sudah termasuk pajak. Kalau usaha mu belum ada pajak maka biarkan tidak ter ceklis.
+        -	Hitung Stok Otomatis?, ini berlaku untuk paket Juragan dan Sultan, ceklis,jika transaksi barang mu ada pengecekan stok, sehingga stok yang sudah 0 tidak bisa di transaksi. Ceklis nya hilangkan jika memang belum siap untuk menerapkan hitung stok otomatis. Untuk paket UMKM hitung stok otomatis tidak ada, jadi murni transaksi tanpa melihat stok.
+        -	Diskon standard toko (%), ini diisi apabila anda memberikan diskon di setiap transaksi yang terjadi, misalkan pada waktu-waktu tertentu, maka apabila ini diisi, setiap transaksi yang terjadi akan terpotong diskon ini. Jika sudah tidak diperlukan lagi diskon ini, maka isi dengan angka 0.
+        -	Rincian Akun bank, Isi no. rekening usaha anda disini, supaya nanti di kasir bisa langsung dilihat no. rekening nya apabila ada yang menggunakan metode pembayaran transfer.
+        -	Ganti foto QRIS, jika memiliki QIRS, upload gambar QRIS mu disitu, sehingga di kasir bisa langsung tampil dan bisa langsung di scan.
+        -	Klik simpan kalau sudah selesai.
+        4.	Kelola Produk, Jika menggunakan HP, didashboard, klik tombol titik 3,klik Kelola Produk
+        -	Export Excel, untuk export ke excel daftar produk dan stok terakhir usaha anda.
+        -	Kategori , setting kategori-kategori produk usaha anda, misalkan kategori BARANG, JASA, atau lebih spesifik lagi, MAKANAN, MINUMAN, SPAREPART, JASA.
+        -	Tambah Produk Baru, untuk menambah produk baru
+
+        Untuk barcode itu opsional,bisa langsung discan dari HP nya, dengan klik tombol gambar kamera. Harga Modal/HPP isi untuk menentukan rugi laba. Stok isi apabila menggunakan hitung stok otomatis.
+        Proses Transaksi di aplikasi POS
+        1.	Transaksi POS,klik tombol POS di dashboar.
+        2.	list katalog produk nya, bisa scan barcode pake HP dengan klik tombol gambar kamera di pojok pencarian barang.
+        3.	Ini Keranjang untuk proses pembayaran,pembayaran bisa Tunai, QRIS dan Transfer. Untuk QRIS dan Transfer harus di upload atau di foto bukti bayarnya, langsung dari HP untuk foto bukti bayar nya. Ketika klik proses Order, maka akan muncul struk. 
+        4.	Pembayaran QRIS, upload/foto bukti bayar
+        5.	Pembayaran Transfer,upload / foto bukti bayar
+       
+
+        Cara Sambungkan ke Printer Bluetooth
+        Panduan menghubungkan aplikasi ke printer thermal Bluetooth
+        1. Aktifkan Bluetooth & Hubungkan Printer ke HP
+        Pastikan printer sudah menyala dan Bluetooth di HP Anda sudah aktif. Scan/cari perangkat printer hingga muncul dan terhubung ke HP Anda.
+        Passcode umum: 0000
+        2.Instal Aplikasi RawBT
+        Instal aplikasi RawBT inkless print service (gratis) melalui Google Play Store.
+        3. Buka Pengaturan RawBT
+        Buka aplikasi RawBT, lalu klik ikon Setting (Pengaturan).
+        4. Tambah Printer (ADD PRINTER)
+        Pada menu Settings, klik tombol ADD PRINTER
+        5. Pilih Metode Bluetooth
+        Pilih metode koneksi Bluetooth
+        Pilih Koneksi Bluetooth
+        6. Pilih Perangkat Printer
+        Klik opsi not selected Pilih nama printer Bluetooth Anda (misal: RPP02N). Jika belum muncul, klik tombol SCANNING DEVICE
+        7. Hubungkan Printer (CONNECT)
+        Setelah perangkat printer dipilih, klik tombol CONNECT untuk menyelesaikan penyambungan.
+    
+        Paket
+        UMKM
+        Rp 25.000 / bulan
+        atau Rp 225.000 / tahun
+        - Maksimal 600 Transaksi/Bulan
+        - Unlimited Produk
+        - Cetak Struk Kasir
+        - Laporan Penjualan + Export to Excel
+
+        JURAGAN
+        Rp 99.000 / bulan
+        atau Rp 999.000 / tahun
+        - Maksimal 3.000 Transaksi/Bulan
+        - Unlimited Produk
+        - Cetak Struk Kasir
+        - Manajemen Stok
+        - Hitung otomatis Harga HPP
+        - Laporan Penjualan + Export Excel
+        - Laporan Laba Rugi
+
+        SULTAN
+        Rp 211.000 / bulan
+        atau Rp 2.110.000 / tahun
+        - Transaksi Tanpa Batas (Unlimited)
+        - Unlimited Produk
+        - Cetak Struk Kasir
+        - Manajemen Stok
+        - Hitung otomatis Harga HPP
+        - Laporan Penjualan + Export Excel
+        - Laporan Laba Rugi
+
         `;
 
         const contentsPayload = [];
@@ -2069,6 +2154,7 @@ app.post('/api/tanya-ai', async (c) => {
             parts: [{ text: message }]
         });
 
+        // GUNAKAN MODEL TERBARU YANG AKTIF (gemini-3.1-flash-lite)
         const response = await ai.models.generateContent({
             model: 'gemini-3.1-flash-lite',
             contents: contentsPayload,
@@ -2077,17 +2163,17 @@ app.post('/api/tanya-ai', async (c) => {
             }
         });
 
-        return c.json({
+        res.json({
             success: true,
             reply: response.text
         });
 
     } catch (error) {
         console.error("Error Internal Tanya AI:", error);
-        return c.json({ 
+        res.status(500).json({ 
             success: false, 
             message: "Gagal memproses pesan AI: " + error.message 
-        }, 500);
+        });
     }
 });
 
