@@ -5,7 +5,7 @@ import midtransClient from 'midtrans-client';
 import crypto from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
-const { GoogleGenAI } = require('@google/genai');
+import { GoogleGenAI } from '@google/genai';
 
 const app = new Hono();
 
@@ -2029,9 +2029,10 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
 });
 
 // ---------------- GEMINI AI ASSISTANT ----------------
-app.post('/api/tanya-ai', async (req, res) => {
+app.post('/api/tanya-ai', async (c) => {
     try {
-        const { message, history } = req.body;
+        const env = c.env || {};
+        const { message, history } = await c.req.json();
 
         if (!message) {
             return res.status(400).json({ success: false, message: "Pesan tidak boleh kosong." });
