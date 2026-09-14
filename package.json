@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.750.0",
+    "@google/genai": "^2.22.0",
     "@google/generative-ai": "^0.22.0",
     "exceljs": "^4.4.0",
     "hono": "^4.7.0",
