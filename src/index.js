@@ -2030,21 +2030,20 @@ app.get('/api/reports/profit-loss/export-excel', verifikasiAksesWarung, async (c
 
 // ---------------- GEMINI AI ASSISTANT ----------------
 app.post('/api/tanya-ai', async (c) => {
+    const env = c.env || {};
     try {
-        const env = c.env || {};
         const { message, history } = await c.req.json();
 
         if (!message) {
-            return res.status(400).json({ success: false, message: "Pesan tidak boleh kosong." });
+            return c.json({ success: false, message: "Pesan tidak boleh kosong." }, 400);
         }
 
-        const apiKey = process.env.GEMINI_API_KEY;
+        const apiKey = env.GEMINI_API_KEY;
         if (!apiKey) {
-            return res.status(500).json({ success: false, message: "API Key Gemini belum diatur di Variables Railway." });
+            return c.json({ success: false, message: "API Key Gemini belum diatur di Variables Cloudflare Workers." }, 500);
         }
 
         const ai = new GoogleGenAI({ apiKey: apiKey });
-
         const systemInstruction = `
         Kamu adalah Asisten BEDA. Tugasmu membantu pemilik warung/usaha terkait settingan warung, QRIS, kelola stok, dan proses transaksi. Jawab dengan bahasa ramah, sopan, dan solutif. Jika ada kendala teknis darurat, sarankan hubungi WhatsApp Admin BEDApos di 089525147422 atau email support@bedadigital.app .
         ATURAN GAYA MENJAWAB (SANGAT PENTING):
@@ -2155,7 +2154,6 @@ app.post('/api/tanya-ai', async (c) => {
             parts: [{ text: message }]
         });
 
-        // GUNAKAN MODEL TERBARU YANG AKTIF (gemini-3.1-flash-lite)
         const response = await ai.models.generateContent({
             model: 'gemini-3.1-flash-lite',
             contents: contentsPayload,
@@ -2164,17 +2162,17 @@ app.post('/api/tanya-ai', async (c) => {
             }
         });
 
-        res.json({
+        return c.json({
             success: true,
             reply: response.text
         });
 
     } catch (error) {
         console.error("Error Internal Tanya AI:", error);
-        res.status(500).json({ 
-            success: false, 
-            message: "Gagal memproses pesan AI: " + error.message 
-        });
+        return c.json({
+            success: false,
+            message: "Gagal memproses pesan AI: " + error.message
+        }, 500);
     }
 });
 
