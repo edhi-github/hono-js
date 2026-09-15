@@ -2115,8 +2115,8 @@ app.post('/api/tanya-ai', async (c) => {
         - Laporan Penjualan + Export to Excel
 
         JURAGAN
-        Rp 99.000 / bulan
-        atau Rp 999.000 / tahun
+        Rp 88.000 / bulan
+        atau Rp 880.000 / tahun
         - Maksimal 3.000 Transaksi/Bulan
         - Unlimited Produk
         - Cetak Struk Kasir
