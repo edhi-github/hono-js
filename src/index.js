@@ -1502,19 +1502,27 @@ app.post('/api/payments/midtrans-notification', async (c) => {
         const transactionStatus = notification.transaction_status;
         const fraudStatus = notification.fraud_status;
 
-        // Forwarding jika transaksi berasal dari sistem lain (Pesan Antar)
+        // Forwarding jika transaksi berasal dari BEDAorder (Pesan Antar)
         if (orderId.startsWith('BEDAORDER-') || orderId.startsWith('ORDER-')) {
             try {
-                await fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
+                const response = await fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'Midtrans-Forwarder-Worker'
+                    },
                     body: JSON.stringify(notification)
                 });
+
+                // PENTING: Wajib di-await agar Worker tidak mematikan request sebelum selesai
+                const resText = await response.text();
+                console.log("Status forwarding ke BEDAorder:", response.status, resText);
             } catch (fwdError) {
-                console.error("Forwarding failed:", fwdError);
+                console.error("Forwarding failed ke BEDAorder:", fwdError);
             }
             return c.json({ success: true, message: "Forwarded" }, 200);
-        } else {
+        }
+        else {
 
         // Jika status pembayaran sukses (settlement atau capture accept)
         if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
