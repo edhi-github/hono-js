@@ -1514,7 +1514,7 @@ app.post('/api/payments/midtrans-notification', async (c) => {
                 console.error("Forwarding failed:", fwdError);
             }
             return c.json({ success: true, message: "Forwarded" }, 200);
-        }
+        } else {
 
         // Jika status pembayaran sukses (settlement atau capture accept)
         if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
@@ -1583,6 +1583,7 @@ app.post('/api/payments/midtrans-notification', async (c) => {
         }
 
         return c.json({ success: true, message: "Notification processed." }, 200);
+        }
     } catch (error) {
         console.error("Error Webhook Midtrans:", error);
         return c.json({ success: false, message: error.message }, 200);
