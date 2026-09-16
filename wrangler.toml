@@ -23,3 +23,7 @@ bucket_name = "beda-asset"
 [vars]
 MYSQLPORT = "3306"
 R2_BUCKET_STR = "beda-asset"
+
+[[services]]
+binding = "BEDAORDER_SERVICE"
+service = "oder-hono-js"

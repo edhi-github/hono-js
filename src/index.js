@@ -1491,9 +1491,10 @@ app.post('/api/payments/midtrans-notification', async (c) => {
 
         // PENTING: Tangkap semua yang mengandung kata BEDAORDER (termasuk BEDAORDER-SUB-)
         if (orderId.includes('BEDAORDER')) {
-            console.log(`[Forwarding] Diteruskan ke BEDAorder: ${orderId}`);
+            console.log(`[Forwarding Service Binding] Diteruskan ke BEDAorder: ${orderId}`);
             try {
-                const response = await fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
+                // Menggunakan Binding bawaan Cloudflare (Langsung antar-worker, 100% Tembus)
+                const response = await c.env.BEDAORDER_SERVICE.fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(notification)
@@ -1503,7 +1504,7 @@ app.post('/api/payments/midtrans-notification', async (c) => {
             } catch (fwdError) {
                 console.error("[Forwarding Error]:", fwdError.message);
             }
-            return c.json({ success: true, message: "Forwarded to BEDAorder" }, 200);
+            return c.json({ success: true, message: "Forwarded to BEDAorder via Binding" }, 200);
         }
         else {
 
