@@ -1482,8 +1482,107 @@ app.get('/api/payments/midtrans-notification', (c) => {
     }, 200);
 });
 
-// Handler khusus POST (pemrosesan data notifikasi dari Midtrans)
 app.post('/api/payments/midtrans-notification', async (c) => {
+    try {
+        let notification = await c.req.json().catch(() => ({}));
+        const orderId = notification.order_id || '';
+        const transactionStatus = notification.transaction_status;
+        const fraudStatus = notification.fraud_status;
+
+        // PENTING: Tangkap semua yang mengandung kata BEDAORDER (termasuk BEDAORDER-SUB-)
+        if (orderId.includes('BEDAORDER')) {
+            console.log(`[Forwarding] Diteruskan ke BEDAorder: ${orderId}`);
+            try {
+                const response = await fetch('https://oder-hono-js.edhi-heriyaman.workers.dev/api/payments/midtrans-notification', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(notification)
+                });
+                const resText = await response.text();
+                console.log("[Forwarding Response]:", response.status, resText);
+            } catch (fwdError) {
+                console.error("[Forwarding Error]:", fwdError.message);
+            }
+            return c.json({ success: true, message: "Forwarded to BEDAorder" }, 200);
+        }
+        else {
+
+        // Jika status pembayaran sukses (settlement atau capture accept)
+        if (transactionStatus === 'settlement' || (transactionStatus === 'capture' && fraudStatus === 'accept')) {
+            const { results: subRows } = await pool.prepare(
+                `SELECT id, shop_id, package_id, billing_cycle 
+                 FROM subscriptions 
+                 WHERE (order_id = ? OR payment_proof_url = ?) AND status = 'pending'`
+            ).bind(orderId, orderId).all();
+
+            if (subRows && subRows.length > 0) {
+                const sub = subRows[0];
+                const daysToAdd = sub.billing_cycle === 'yearly' ? 365 : 30;
+
+                const { results: shopRows } = await pool.prepare(
+                    `SELECT subscription_until, max_transactions_monthly FROM shops WHERE id = ?`
+                ).bind(sub.shop_id).all();
+
+                const { results: pkgRows } = await pool.prepare(
+                    `SELECT id, max_transactions_monthly FROM packages WHERE id = ?`
+                ).bind(sub.package_id).all();
+
+                const pkgMaxTx = pkgRows.length > 0 ? pkgRows[0].max_transactions_monthly : 0;
+                const isNewSultan = (sub.package_id === 3);
+                const shop = shopRows[0];
+                const hariIni = new Date();
+
+                let newUntilDate = new Date();
+                let newQuota = 0;
+
+                if (shop && shop.subscription_until && new Date(shop.subscription_until) > hariIni) {
+                    const baseDate = new Date(shop.subscription_until);
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : (Math.max(0, parseInt(shop.max_transactions_monthly) || 0) + pkgMaxTx);
+                } else {
+                    const baseDate = new Date();
+                    baseDate.setDate(baseDate.getDate() + daysToAdd);
+                    newUntilDate = baseDate;
+
+                    newQuota = isNewSultan ? 0 : pkgMaxTx;
+                }
+
+                const startDateStr = hariIni.toISOString().split('T')[0];
+                const newUntilStr = newUntilDate.toISOString().split('T')[0];
+
+                await pool.prepare(
+                    `UPDATE shops 
+                    SET subscription_status = 'active', 
+                        subscription_until = ?, 
+                        package_id = ?, 
+                        billing_cycle = ?,
+                        max_transactions_monthly = ? 
+                    WHERE id = ?`
+                ).bind(newUntilStr, sub.package_id, sub.billing_cycle, newQuota, sub.shop_id).run();
+
+                await pool.prepare(
+                    `UPDATE subscriptions 
+                    SET status = 'active', 
+                        start_date = ?, 
+                        end_date = ?,
+                        max_transactions_monthly = ?
+                    WHERE id = ?`
+                ).bind(startDateStr, newUntilStr, newQuota, sub.id).run();
+            }
+        }
+
+        return c.json({ success: true, message: "Notification processed." }, 200);
+        }
+    } catch (error) {
+        console.error("Error Webhook Midtrans:", error);
+        return c.json({ success: false, message: error.message }, 200);
+    }
+});
+
+// Handler khusus POST (pemrosesan data notifikasi dari Midtrans)
+/*app.post('/api/payments/midtrans-notification', async (c) => {
     try {
         const pool = getDbPool(c);
         let notification = {};
@@ -1597,6 +1696,7 @@ app.post('/api/payments/midtrans-notification', async (c) => {
         return c.json({ success: false, message: error.message }, 200);
     }
 });
+*/
 
 // ---------------- EXPORT EXCEL RIWAYAT TRANSAKSI ----------------
 app.get('/api/orders/export-excel', verifikasiAksesWarung, async (c) => {
