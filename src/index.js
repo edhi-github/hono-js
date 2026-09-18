@@ -1367,7 +1367,7 @@ app.post('/api/register', async (c) => {
             VALUES (?, ?, ?, 0.00, ?, ?, 'active', ?, ?)`
         ).bind(newShopId, selectedPackageId, `Trial 14 Hari (${packageData.name} - ${cycle.toUpperCase()})`, startDateStr, endDateStr, cycle, 50).run();
 
-        const smsMessage = `${shop_name} (TRIAL 14hr), Link Aplikasi: pos.bedadigital.app/login.html `;
+        const smsMessage = `${shop_name} (TRIAL 14hr), Link Aplikasi: https://pos.bedadigital.app/login.html `;
    
         await smspool.prepare(
             `INSERT INTO sms_queue (phone, message, status, retry_count) VALUES (?, ?, 'PENDING', 0)`
